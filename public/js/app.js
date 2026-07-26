@@ -1705,19 +1705,8 @@ async function downloadQrisImage() {
     if (!modalBox) return;
 
     const qrisImg = document.getElementById('qris-img-element');
-    const originalSrc = qrisImg ? qrisImg.src : null;
 
     showNotificationModal('Mengunduh Nota Pemesanan...', 'Menyiapkan gambar nota...', '🖼️', 'info');
-
-    // Convert QR image to base64 via XHR (bypasses all CORS restrictions for same-origin uploads)
-    let base64Src = null;
-    if (qrisImg && originalSrc) {
-        if (originalSrc.startsWith('data:')) {
-            base64Src = originalSrc;
-        } else {
-            base64Src = await imageUrlToBase64(originalSrc);
-        }
-    }
 
     const orderIdEl = document.getElementById('pay-modal-order-id');
     const cleanId = orderIdEl ? orderIdEl.textContent.trim().replace('#', '') : 'ORD';
@@ -1731,50 +1720,39 @@ async function downloadQrisImage() {
     try {
         const SCALE = 2.5;
 
-        // Get QR img position relative to modalBox BEFORE html2canvas runs
-        let qrRect = null;
-        let modalRect = null;
-        if (qrisImg && base64Src) {
-            qrRect = qrisImg.getBoundingClientRect();
-            modalRect = modalBox.getBoundingClientRect();
-        }
-
-        // Run html2canvas, ignoring the QR img element entirely to avoid CORS blank
+        // Run html2canvas with CORS enabled so external QR images load properly
         const canvas = await html2canvas(modalBox, {
             scale: SCALE,
-            useCORS: false,
+            useCORS: true,
             allowTaint: true,
             backgroundColor: '#18181b',
             logging: false,
-            imageTimeout: 0,
-            ignoreElements: (el) => el === qrisImg
+            imageTimeout: 5000
         });
 
-        // If we have QR base64 and position, paint it manually onto the canvas
-        if (qrRect && modalRect && base64Src) {
+        // Ensure QR code is drawn onto canvas if html2canvas missed it
+        if (qrisImg && qrisImg.complete && qrisImg.naturalWidth > 0) {
+            const qrRect = qrisImg.getBoundingClientRect();
+            const modalRect = modalBox.getBoundingClientRect();
             const ctx = canvas.getContext('2d');
             const x = (qrRect.left - modalRect.left) * SCALE;
             const y = (qrRect.top - modalRect.top) * SCALE;
             const w = qrRect.width * SCALE;
             const h = qrRect.height * SCALE;
 
-            await new Promise((resolve) => {
-                const img = new Image();
-                img.onload = () => {
-                    // White background for QR (matches white padding box in HTML)
-                    ctx.fillStyle = '#ffffff';
-                    ctx.fillRect(x, y, w, h);
-                    ctx.drawImage(img, x, y, w, h);
-                    resolve();
-                };
-                img.onerror = () => resolve(); // leave blank if fails
-                img.src = base64Src;
-            });
+            try {
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(x, y, w, h);
+                ctx.drawImage(qrisImg, x, y, w, h);
+            } catch (drawErr) {
+                console.warn('Direct drawImage on qrisImg warning:', drawErr);
+            }
         }
 
         canvas.toBlob((blob) => {
             if (!blob) {
-                console.error('toBlob returned null');
+                console.error('toBlob returned null, using fallback');
+                fallbackCanvasDownload();
                 return;
             }
             const blobUrl = URL.createObjectURL(blob);
