@@ -1100,14 +1100,24 @@ body {
 .mobile-bottom-nav {
     display: flex !important;
     flex-shrink: 0; /* DOCKS AT BOTTOM OF APP SHELL */
-    height: calc(58px + var(--safe-bottom));
+    height: calc(72px + var(--safe-bottom));
     background: var(--bg-card);
     border-top: 1.5px solid var(--border-color);
     z-index: 1100;
-    padding: 4px 8px var(--safe-bottom) 8px;
+    padding: 4px 8px calc(var(--safe-bottom) + 14px) 8px;
     align-items: center;
     justify-content: center;
     box-shadow: 0 -4px 16px rgba(0,0,0,0.12);
+    
+    /* Hide by default until app is loaded to prevent layout flashes */
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.15s ease, visibility 0.15s ease;
+}
+
+body.app-loaded .mobile-bottom-nav {
+    opacity: 1;
+    visibility: visible;
 }
 
 .mobile-boxed-nav-wrapper {
@@ -1120,6 +1130,28 @@ body {
     gap: 3px;
     align-items: center;
     height: 100%;
+}
+
+/* ROLE-BASED NAVIGATION VISIBILITY ENGINE */
+html[data-user-role="admin"] .mobile-nav-item[data-role]:not([data-role="admin"]) {
+    display: none !important;
+}
+html[data-user-role="user"] .mobile-nav-item[data-role]:not([data-role="user"]) {
+    display: none !important;
+}
+html[data-user-role="visitor"] .mobile-nav-item[data-role]:not([data-role="visitor"]) {
+    display: none !important;
+}
+
+/* Ensure matching role buttons are displayed as flex */
+html[data-user-role="admin"] .mobile-nav-item[data-role="admin"] {
+    display: flex;
+}
+html[data-user-role="user"] .mobile-nav-item[data-role="user"] {
+    display: flex;
+}
+html[data-user-role="visitor"] .mobile-nav-item[data-role="visitor"] {
+    display: flex;
 }
 
 .mobile-nav-item {

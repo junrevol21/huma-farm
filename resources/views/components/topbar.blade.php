@@ -29,12 +29,7 @@
                 <span>💳</span>
             </button>
 
-            <!-- 4. Logo Gear Pengaturan (Tampil saat Mode Login) -->
-            <button class="btn-icon" id="topbar-settings-btn" title="Pengaturan Akun" onclick="switchPage('pengaturan')" style="display: none;">
-                <span>⚙️</span>
-            </button>
-
-            <!-- 5. Icon Logout (Tampil saat Mode Login) -->
+            <!-- 4. Icon Logout (Tampil saat Mode Login) -->
             <button class="btn-icon" id="logout-btn" onclick="handleLogoutClick()" title="Logout / Keluar Akun" style="display: none; color: var(--ranch-rose); border-color: rgba(190, 18, 60, 0.3);">
                 <span>🚪</span>
             </button>

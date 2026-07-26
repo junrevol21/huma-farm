@@ -1,13 +1,18 @@
 <!DOCTYPE html>
 <html lang="id" data-theme="dark">
 <head>
+    <script>
+        // Set user role attribute instantly to prevent bottom-nav layout flashes (FOUC)
+        document.documentElement.setAttribute('data-user-role', localStorage.getItem('huma_farm_role') || 'visitor');
+    </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>@yield('title', 'Huma Farm - Peternakan Telur Omega')</title>
     <meta name="description" content="Aplikasi pencatatan panen, toko online, leaderboard pembeli, dan edukasi nutrisi Huma Farm.">
     <link rel="stylesheet" href="{{ asset('css/styles.css') }}">
-    <!-- CHART.JS CDN FOR DASHBOARD ANALYTICS -->
+    <!-- CHART.JS & HTML2CANVAS CDN FOR ANALYTICS AND EXACT WEBPAGE NOTA SCREENSHOTS -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
 </head>
 <body>
 
@@ -47,7 +52,7 @@
     </div>
 
     <!-- SCRIPTS -->
-    <script src="{{ asset('js/app.js') }}"></script>
+    <script charset="utf-8" src="{{ asset('js/app.js') }}?v={{ time() }}"></script>
     @stack('scripts')
 </body>
 </html>

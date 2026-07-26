@@ -1,5 +1,5 @@
 <!-- HALAMAN: EDUKASI (DEFAULT VISITORS & INTERACTIVE LANDING PAGE) -->
-<section id="edukasi" class="page-section active">
+<section id="edukasi" class="page-section">
 
     <!-- HERO LANDING BANNER CARD (OVERFLOW VISIBLE - NO BLOB BUG) -->
     <div class="edukasi-hero-card">

@@ -81,7 +81,22 @@ class OrderController extends Controller
      */
     public function store(Request $request)
     {
+        // Auto-map aliases from frontend if present
+        if (!$request->has('category') && $request->has('egg_category')) {
+            $request->merge(['category' => $request->input('egg_category')]);
+        }
+        if (!$request->has('unit') && $request->has('package_type')) {
+            $request->merge(['unit' => $request->input('package_type')]);
+        }
+        if (!$request->has('qty') && $request->has('quantity')) {
+            $request->merge(['qty' => $request->input('quantity')]);
+        }
+        if (!$request->has('payment_status') && $request->has('status')) {
+            $request->merge(['payment_status' => $request->input('status')]);
+        }
+
         $validator = Validator::make($request->all(), [
+            'id' => 'nullable|string|max:100',
             'buyer_name' => 'required|string|max:100',
             'buyer_phone' => 'nullable|string|max:30',
             'category' => 'required|string|in:negeri,kampung',
@@ -133,10 +148,14 @@ class OrderController extends Controller
             }
         }
 
-        // Generate Order ID: ORD- + millisecond timestamp
-        $orderId = 'ORD-' . round(microtime(true) * 1000) . '-' . rand(10, 99);
+        // Use request parameter id if provided, otherwise generate
+        $orderId = $request->input('id');
+        if (!$orderId) {
+            $orderId = 'ORD-' . round(microtime(true) * 1000) . '-' . rand(10, 99);
+        }
 
-        $order = Order::create([
+        $createdAt = $request->input('created_at');
+        $orderData = [
             'id' => $orderId,
             'po_number' => $poNumber,
             'buyer_name' => $buyerName,
@@ -149,7 +168,12 @@ class OrderController extends Controller
             'status' => $status,
             'shortage_eggs' => $shortageEggs,
             'payment_status' => $paymentStatus
-        ]);
+        ];
+        if ($createdAt) {
+            $orderData['created_at'] = \Illuminate\Support\Carbon::parse($createdAt);
+            $orderData['updated_at'] = \Illuminate\Support\Carbon::parse($createdAt);
+        }
+        $order = Order::updateOrCreate(['id' => $orderId], $orderData);
 
         return response()->json([
             'success' => true,

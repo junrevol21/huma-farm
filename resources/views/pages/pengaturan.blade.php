@@ -3,127 +3,70 @@
     <div class="page-header">
         <div>
             <h1 class="page-title">⚙️ Halaman Pengaturan Akun</h1>
-            <p class="page-subtitle">Ubah logo profil, perbarui nomor WhatsApp, dan ganti password akun Anda.</p>
+            <p class="page-subtitle">Pilih pengaturan di bawah untuk melakukan perubahan profil dan akun Anda.</p>
         </div>
     </div>
 
-    <div class="grid-2">
-        <!-- 1. UBAH LOGO PROFIL (EMOJI KEYBOARD GRID PICKER) -->
-        <div class="ranch-card">
-            <h3>🎨 Ubah Logo Profil</h3>
-            <form onsubmit="handleUpdateAvatarSubmit(event)" style="margin-top: 10px;">
-                <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 10px;">
-                    <div id="settings-avatar-preview" style="width: 62px; height: 62px; border-radius: 50%; background: linear-gradient(135deg, var(--ranch-gold), var(--ranch-amber)); color: white; display: flex; align-items: center; justify-content: center; font-size: 2.1rem; font-weight: 800; border: 2.5px solid var(--border-color); box-shadow: 0 4px 10px rgba(0,0,0,0.15); overflow: hidden; flex-shrink: 0;">
-                        👤
-                    </div>
-                    <div>
-                        <strong style="font-size: 0.9rem; color: var(--text-main); display: block;" id="preview-logo-label">Logo Profil Aktif</strong>
-                        <span style="font-size: 0.76rem; color: var(--text-muted);">Pilih icon favorit Anda di keyboard emoji bawah.</span>
-                    </div>
-                </div>
-
-                <!-- EMOJI KEYBOARD GRID CONTAINER (THEME PETERNAKAN) -->
-                <div class="emoji-keyboard-wrapper">
-                    <div class="emoji-keyboard-title">
-                        <span>🌾 Pilihan Icon Peternakan & Alam:</span>
-                        <span style="font-size: 0.7rem; color: var(--ranch-amber);">Klik Icon</span>
-                    </div>
-                    <div class="emoji-grid-container" id="farm-emoji-picker-grid">
-                        <!-- DILENGKAPI VIA JS AUTOMATICALLY -->
-                    </div>
-                </div>
-
-                <button type="submit" class="btn btn-ranch" style="width: 100%;">💾 Simpan Logo Profil Baru</button>
-            </form>
+    <!-- PROFILE INFO CARD -->
+    <div class="ranch-card" style="margin-bottom: 20px; display: flex; align-items: center; gap: 16px; padding: 16px;">
+        <div id="settings-profile-avatar" style="width: 70px; height: 70px; border-radius: 50%; background: linear-gradient(135deg, var(--ranch-gold), var(--ranch-amber)); color: white; display: flex; align-items: center; justify-content: center; font-size: 2.5rem; font-weight: 800; border: 2.5px solid var(--border-color); box-shadow: 0 4px 12px rgba(0,0,0,0.15); flex-shrink: 0;">
+            👤
         </div>
-
-        <!-- 2. UPDATE NOMOR WA (DENGAN VERIFIKASI PASSWORD EXISTING) -->
-        <div class="ranch-card">
-            <h3>📱 Update Nomor WhatsApp</h3>
-            <form onsubmit="handleUpdatePhoneSubmit(event)" style="margin-top: 10px;">
-                <div style="margin-bottom: 8px;">
-                    <label class="form-label">Nomor WA Baru:</label>
-                    <input type="tel" id="set-new-phone" class="form-input" placeholder="08xxxxxxxxxx" required>
-                </div>
-                <div style="margin-bottom: 14px;">
-                    <label class="form-label">Konfirmasi Password Anda Sekarang:</label>
-                    <input type="password" id="set-confirm-curr-pass" class="form-input" placeholder="Password existing..." required>
-                </div>
-                <button type="submit" class="btn btn-ranch" style="width: 100%;">📱 Perbarui Nomor WA</button>
-            </form>
+        <div>
+            <h2 id="settings-profile-name" style="font-size: 1.25rem; font-weight: 800; color: var(--text-main); margin: 0 0 4px 0;">Pengguna</h2>
+            <span id="settings-profile-role" style="font-size: 0.72rem; padding: 2px 8px; border-radius: 12px; font-weight: 700; background: var(--bg-card-subtle); border: 1px solid var(--border-color); color: var(--ranch-amber);">Role</span>
+            <p id="settings-profile-phone" style="font-size: 0.78rem; color: var(--text-muted); margin: 6px 0 0 0;">📱 WhatsApp: -</p>
         </div>
+    </div>
 
-        <!-- 3. RUBAH PASSWORD -->
-        <div class="ranch-card">
-            <h3>🔐 Rubah Password Akun</h3>
-            <form onsubmit="handleChangePasswordSubmit(event)" style="margin-top: 10px;">
-                <div style="margin-bottom: 8px;">
-                    <label class="form-label">Password Lama:</label>
-                    <input type="password" id="chg-old-pass" class="form-input" placeholder="Password lama saat ini..." required>
+    <!-- SETTINGS BUTTONS MENU -->
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+        <!-- Button Ubah Logo Profil -->
+        <button type="button" class="btn btn-outline" onclick="openSettingsModal('modal-settings-avatar')" style="display: flex; align-items: center; justify-content: space-between; text-align: left; padding: 14px 18px; width: 100%; border-radius: var(--radius-md); background: var(--bg-card); transition: all 0.2s ease;">
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <span style="font-size: 1.2rem;">🎨</span>
+                <div>
+                    <strong style="display: block; font-size: 0.88rem; color: var(--text-main);">Ubah Logo Profil</strong>
+                    <span style="font-size: 0.72rem; color: var(--text-muted);">Pilih icon emoji karakter profil Anda</span>
                 </div>
-                <div style="margin-bottom: 8px;">
-                    <label class="form-label">Password Baru:</label>
-                    <input type="password" id="chg-new-pass" class="form-input" placeholder="Password baru..." required>
-                </div>
-                <div style="margin-bottom: 14px;">
-                    <label class="form-label">Konfirmasi Password Baru:</label>
-                    <input type="password" id="chg-confirm-pass" class="form-input" placeholder="Ulangi password baru..." required>
-                </div>
-                <button type="submit" class="btn btn-outline" style="width: 100%;">🔒 Simpan Password Baru</button>
-            </form>
-        </div>
-
-        <!-- 4. PENGATURAN PEMBAYARAN ADMIN -->
-        <div class="ranch-card" data-role="admin" id="admin-payment-setting-card" style="display: none; grid-column: 1 / -1;">
-            <h3 style="margin-bottom: 12px;">💳 Pengaturan Metode Pembayaran</h3>
-
-            <!-- BANK SETTINGS -->
-            <div style="background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; margin-bottom: 12px;">
-                <p style="font-size: 0.78rem; font-weight: 700; color: var(--ranch-amber); margin-bottom: 10px;">🏦 Pengaturan Rekening Bank</p>
-                <form onsubmit="handleUpdateBankSubmit(event)">
-                    <div style="margin-bottom: 8px;">
-                        <label class="form-label">Nama Bank:</label>
-                        <input type="text" id="setting-bank-name" class="form-input" placeholder="Contoh: BSI, BCA, Mandiri...">
-                    </div>
-                    <div style="margin-bottom: 8px;">
-                        <label class="form-label">Nomor Rekening:</label>
-                        <input type="text" id="setting-bank-number" class="form-input" placeholder="Contoh: 7367004597">
-                    </div>
-                    <div style="margin-bottom: 10px;">
-                        <label class="form-label">Atas Nama:</label>
-                        <input type="text" id="setting-bank-owner" class="form-input" placeholder="Nama pemilik rekening">
-                    </div>
-                    <button type="submit" class="btn btn-ranch" style="width: 100%;">🏦 Simpan Data Bank</button>
-                </form>
             </div>
+            <span style="font-size: 0.9rem; color: var(--text-muted);">➔</span>
+        </button>
 
-            <!-- QRIS SETTINGS -->
-            <div style="background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 8px; padding: 12px;">
-                <p style="font-size: 0.78rem; font-weight: 700; color: var(--ranch-amber); margin-bottom: 10px;">📱 Pengaturan QRIS</p>
-                <form onsubmit="handleUpdateQrisSubmit(event)">
-                    <div style="margin-bottom: 8px;">
-                        <label class="form-label">Nama Merchant QRIS:</label>
-                        <input type="text" id="setting-qris-merchant" class="form-input" placeholder="Contoh: Huma Farm">
-                    </div>
-                    <div style="margin-bottom: 10px;">
-                        <label class="form-label">URL Gambar QR Code:</label>
-                        <input type="text" id="setting-qris-url" class="form-input" placeholder="images/qris_huma_farm.png">
-                    </div>
-                    <div style="margin-bottom: 12px; background: var(--bg-card); padding: 8px; border-radius: 6px; border: 1px dashed var(--border-color);">
-                        <label class="form-label" style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 4px;">
-                            <span>📤 Pilih Gambar QRIS (Galeri/File):</span>
-                            <span id="upload-qris-status" style="font-size:0.65rem; color:var(--text-muted);">Siap</span>
-                        </label>
-                        <input type="file" id="setting-qris-file" accept="image/*" class="form-input" style="font-size:0.72rem; padding:4px;" onchange="handleQrisFileSelect(this)">
-                    </div>
-                    <!-- QRIS Preview -->
-                    <div style="text-align: center; margin-bottom: 10px;">
-                        <img id="qris-preview-settings" src="images/qris_huma_farm.png" alt="Preview QRIS" style="max-width: 120px; border-radius: 8px; border: 1px solid var(--border-color);">
-                        <p style="font-size: 0.67rem; color: var(--text-muted); margin-top: 3px;">Preview QR Code saat ini</p>
-                    </div>
-                    <button type="submit" class="btn btn-ranch" style="width: 100%;">📱 Simpan Pengaturan QRIS</button>
-                </form>
+        <!-- Button Ubah Nomor WA -->
+        <button type="button" class="btn btn-outline" onclick="openSettingsModal('modal-settings-phone')" style="display: flex; align-items: center; justify-content: space-between; text-align: left; padding: 14px 18px; width: 100%; border-radius: var(--radius-md); background: var(--bg-card); transition: all 0.2s ease;">
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <span style="font-size: 1.2rem;">📱</span>
+                <div>
+                    <strong style="display: block; font-size: 0.88rem; color: var(--text-main);">Ubah Nomor WhatsApp</strong>
+                    <span style="font-size: 0.72rem; color: var(--text-muted);">Perbarui nomor WhatsApp aktif untuk pemesanan</span>
+                </div>
             </div>
-        </div>
+            <span style="font-size: 0.9rem; color: var(--text-muted);">➔</span>
+        </button>
+
+        <!-- Button Ubah Password -->
+        <button type="button" class="btn btn-outline" onclick="openSettingsModal('modal-settings-password')" style="display: flex; align-items: center; justify-content: space-between; text-align: left; padding: 14px 18px; width: 100%; border-radius: var(--radius-md); background: var(--bg-card); transition: all 0.2s ease;">
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <span style="font-size: 1.2rem;">🔐</span>
+                <div>
+                    <strong style="display: block; font-size: 0.88rem; color: var(--text-main);">Ubah Password Akun</strong>
+                    <span style="font-size: 0.72rem; color: var(--text-muted);">Perbarui kata sandi keamanan akun Anda</span>
+                </div>
+            </div>
+            <span style="font-size: 0.9rem; color: var(--text-muted);">➔</span>
+        </button>
+
+        <!-- Button Pengaturan Metode Pembayaran (Admin Only) -->
+        <button type="button" class="btn btn-outline" id="admin-payment-setting-card" data-role="admin" onclick="openSettingsModal('modal-settings-payment')" style="display: none; align-items: center; justify-content: space-between; text-align: left; padding: 14px 18px; width: 100%; border-radius: var(--radius-md); background: var(--bg-card); transition: all 0.2s ease;">
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <span style="font-size: 1.2rem;">💳</span>
+                <div>
+                    <strong style="display: block; font-size: 0.88rem; color: var(--text-main);">Pengaturan Metode Pembayaran</strong>
+                    <span style="font-size: 0.72rem; color: var(--text-muted);">Kelola rekening transfer bank dan QRIS merchant</span>
+                </div>
+            </div>
+            <span style="font-size: 0.9rem; color: var(--text-muted);">➔</span>
+        </button>
     </div>
 </section>

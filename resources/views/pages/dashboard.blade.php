@@ -65,7 +65,7 @@
             <div class="kpi-info">
                 <span class="kpi-label">Pelanggan</span>
                 <strong class="kpi-val" id="kpi-customers-val">0</strong>
-                <span class="kpi-sub">Pembeli Terdaftar</span>
+                <span class="kpi-sub">Pembeli Unik (Riwayat)</span>
             </div>
         </div>
     </div>

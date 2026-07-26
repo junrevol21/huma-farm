@@ -6,7 +6,7 @@
             <p class="page-subtitle">Kelola kas uang masuk hasil penjualan telur dan catat biaya operasional peternakan.</p>
         </div>
         <button class="btn btn-ranch" style="font-size: 0.76rem; padding: 6px 12px;" onclick="openInputPengeluaranModal()">
-            ➕ Catat Pengeluaran
+            ➕ Catat Cash Flow
         </button>
     </div>
 

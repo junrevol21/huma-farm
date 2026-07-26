@@ -16,7 +16,6 @@ Route::post('/login', [AuthController::class, 'login']);
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/reset-password', [AuthController::class, 'resetPassword']);
 
-// Full sync (source of truth — all-in-one for initial page load)
 Route::get('/sync', [SettingController::class, 'sync']);
 
 // Paginated list endpoints — for lazy loading & large datasets
@@ -38,6 +37,9 @@ Route::post('/settings/profile', [SettingController::class, 'saveProfile']);
 // -------------------------------------------------------
 Route::middleware('admin.token')->group(function () {
 
+    // Token validity check — used by frontend session checker
+    Route::get('/auth/check', [AuthController::class, 'check']);
+
     // Panen (harvest) management
     Route::post('/panen', [HarvestController::class, 'store']);
     Route::delete('/panen/{id}', [HarvestController::class, 'destroy']);
@@ -47,6 +49,7 @@ Route::middleware('admin.token')->group(function () {
 
     // Expense management
     Route::post('/expenses', [ExpenseController::class, 'store']);
+    Route::put('/expenses/{id}', [ExpenseController::class, 'update']);
     Route::delete('/expenses/{id}', [ExpenseController::class, 'destroy']);
 
     // Settings — prices, bank, qris

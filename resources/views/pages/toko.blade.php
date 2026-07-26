@@ -17,17 +17,26 @@
         
         <!-- BOX TELUR NEGERI -->
         <div class="ranch-card" style="padding: 8px;">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px;">
-                <div style="display: flex; align-items: center; gap: 4px;">
-                    <span class="egg-icon-badge" style="width: 24px; height: 24px;">
-                        <svg width="14" height="18" viewBox="0 0 100 125">
-                            <path d="M 50,5 C 22,5 5,45 5,75 C 5,102 25,120 50,120 C 75,120 95,102 95,75 C 95,45 78,5 50,5 Z" fill="#B06530"/>
-                            <ellipse cx="38" cy="32" rx="14" ry="22" fill="#FFFFFF" opacity="0.25" transform="rotate(-18 38 32)"/>
-                        </svg>
-                    </span>
-                    <strong style="font-size: 0.76rem; color: var(--text-main);">Telur Negeri</strong>
+            <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 4px;">
+                <span class="egg-icon-badge" style="width: 24px; height: 24px; flex-shrink: 0;">
+                    <svg width="14" height="18" viewBox="0 0 100 125">
+                        <path d="M 50,5 C 22,5 5,45 5,75 C 5,102 25,120 50,120 C 75,120 95,102 95,75 C 95,45 78,5 50,5 Z" fill="#B06530"/>
+                        <ellipse cx="38" cy="32" rx="14" ry="22" fill="#FFFFFF" opacity="0.25" transform="rotate(-18 38 32)"/>
+                    </svg>
+                </span>
+                <strong style="font-size: 0.78rem; color: var(--text-main); white-space: nowrap;">Telur Negeri</strong>
+            </div>
+
+            <!-- PRICING BOX (PACK & ECERAN PER BUTIR) -->
+            <div style="display: flex; flex-direction: column; gap: 2px; background: var(--bg-card-subtle); padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border-color); margin-bottom: 5px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; font-size: 0.65rem;">
+                    <span style="color: var(--text-muted); font-weight: 600;">📦 Pack:</span>
+                    <strong style="color: #b06530; font-size: 0.68rem;" id="toko-price-negeri-pack">Rp 25.000</strong>
                 </div>
-                <span style="font-size: 0.62rem; background: var(--bg-card-subtle); padding: 1px 4px; border-radius: 4px; font-weight: 700; color: #b06530;" id="toko-price-negeri-badge">Rp 25.000/Pack</span>
+                <div style="display: flex; align-items: center; justify-content: space-between; font-size: 0.65rem;">
+                    <span style="color: var(--text-muted); font-weight: 600;">🥚 Eceran:</span>
+                    <strong style="color: var(--ranch-amber); font-size: 0.68rem;" id="toko-price-negeri-egg">Rp 2.500/btr</strong>
+                </div>
             </div>
 
             <!-- TOTAL STOK TERSEDIA -->
@@ -51,17 +60,26 @@
 
         <!-- BOX TELUR KAMPUNG -->
         <div class="ranch-card" style="padding: 8px;">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px;">
-                <div style="display: flex; align-items: center; gap: 4px;">
-                    <span class="egg-icon-badge" style="width: 24px; height: 24px;">
-                        <svg width="14" height="18" viewBox="0 0 100 125">
-                            <path d="M 50,5 C 22,5 5,45 5,75 C 5,102 25,120 50,120 C 75,120 95,102 95,75 C 95,45 78,5 50,5 Z" fill="#FFFFFF" stroke="#94A3B8" stroke-width="4"/>
-                            <ellipse cx="38" cy="32" rx="14" ry="22" fill="#FFFFFF" opacity="0.75" transform="rotate(-18 38 32)"/>
-                        </svg>
-                    </span>
-                    <strong style="font-size: 0.76rem; color: var(--text-main);">Telur Kampung</strong>
+            <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 4px;">
+                <span class="egg-icon-badge" style="width: 24px; height: 24px; flex-shrink: 0;">
+                    <svg width="14" height="18" viewBox="0 0 100 125">
+                        <path d="M 50,5 C 22,5 5,45 5,75 C 5,102 25,120 50,120 C 75,120 95,102 95,75 C 95,45 78,5 50,5 Z" fill="#FFFFFF" stroke="#94A3B8" stroke-width="4"/>
+                        <ellipse cx="38" cy="32" rx="14" ry="22" fill="#FFFFFF" opacity="0.75" transform="rotate(-18 38 32)"/>
+                    </svg>
+                </span>
+                <strong style="font-size: 0.78rem; color: var(--text-main); white-space: nowrap;">Telur Kampung</strong>
+            </div>
+
+            <!-- PRICING BOX (PACK & ECERAN PER BUTIR) -->
+            <div style="display: flex; flex-direction: column; gap: 2px; background: var(--bg-card-subtle); padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border-color); margin-bottom: 5px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; font-size: 0.65rem;">
+                    <span style="color: var(--text-muted); font-weight: 600;">📦 Pack:</span>
+                    <strong style="color: var(--text-main); font-size: 0.68rem;" id="toko-price-kampung-pack">Rp 35.000</strong>
                 </div>
-                <span style="font-size: 0.62rem; background: var(--bg-card-subtle); padding: 1px 4px; border-radius: 4px; font-weight: 700; color: var(--text-muted);" id="toko-price-kampung-badge">Rp 35.000/Pack</span>
+                <div style="display: flex; align-items: center; justify-content: space-between; font-size: 0.65rem;">
+                    <span style="color: var(--text-muted); font-weight: 600;">🥚 Eceran:</span>
+                    <strong style="color: var(--ranch-green); font-size: 0.68rem;" id="toko-price-kampung-egg">Rp 3.500/btr</strong>
+                </div>
             </div>
 
             <!-- TOTAL STOK TERSEDIA -->

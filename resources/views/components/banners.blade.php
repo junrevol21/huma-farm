@@ -5,7 +5,7 @@
 </div>
 
 <!-- VISITOR WA QUICK CTA BANNER (HANYA TAMPIL UNTUK VISITOR) -->
-<div id="visitor-wa-banner" class="visitor-wa-banner">
+<div id="visitor-wa-banner" class="visitor-wa-banner" style="display:none;">
     <div class="visitor-banner-info">🌿 <strong>Huma Farm</strong> — Telur Omega Segar Langsung dari Peternakan!</div>
     <div class="visitor-banner-actions">
         <button onclick="openQuickUserOrderModal(); return false;" class="wa-banner-btn" style="flex: 1;">💬 Pesan via WhatsApp</button>

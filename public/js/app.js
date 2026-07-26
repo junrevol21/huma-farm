@@ -6,6 +6,33 @@
 // LARAVEL API CONFIGURATION
 const API_BASE = '/api';
 
+/**
+ * Normalize QRIS image URL to always be a relative path.
+ * Prevents broken images when switching between local IP and public domain (e.g. belitelur.my.id).
+ * - Absolute URL with same or different host  → extract pathname only (/uploads/qris/...)
+ * - External QR generator API URL             → keep as-is (api.qrserver.com etc)
+ * - Raw QRIS string (starts with 000201)      → keep as-is
+ * - Already relative path                     → keep as-is
+ */
+function normalizeQrisImageUrl(url) {
+    if (!url) return '';
+    if (url.startsWith('000201')) return url; // raw QRIS EMV string
+    if (url.startsWith('data:')) return url;  // base64 image
+    // External QR code generator APIs - keep as-is
+    if (url.startsWith('https://api.qrserver.com') ||
+        url.startsWith('https://chart.googleapis.com') ||
+        url.startsWith('https://quickchart.io')) return url;
+    // Absolute URL (http:// or https://) - extract only the pathname
+    try {
+        const parsed = new URL(url);
+        return parsed.pathname; // e.g. '/uploads/qris/qris_code_xxx.png'
+    } catch(e) {
+        // Already a relative path like '/uploads/qris/...' or 'images/qris_huma_farm.png'
+        return url;
+    }
+}
+
+
 async function apiRequest(endpoint, method = 'GET', body = null) {
     const url = `${API_BASE}${endpoint}`;
     const headers = {
@@ -23,6 +50,11 @@ async function apiRequest(endpoint, method = 'GET', body = null) {
     const response = await fetch(url, options);
     const data = await response.json();
     if (!response.ok) {
+        if (response.status === 401 || response.status === 403 || data.error === 'INVALID_TOKEN') {
+            // Show session expired popup first, THEN switch to visitor mode
+            showSessionExpiredModal();
+            throw new Error('Sesi berakhir. Silakan login kembali.');
+        }
         throw new Error(data.message || 'Terjadi kesalahan sistem.');
     }
     return data;
@@ -42,6 +74,18 @@ function setButtonLoading(btn, isLoading) {
         btn.disabled = false;
         btn.innerHTML = btn.dataset.originalText || btn.innerHTML;
     }
+}
+
+/**
+ * Smart CRUD error handler — shows session expired modal if token is invalid,
+ * otherwise shows a generic error notification.
+ * @param {Error} err - The caught error object
+ * @param {string} fallbackTitle - Title to show for non-session errors
+ * @param {string} fallbackMsg - Message to show for non-session errors
+ */
+function handleCrudError(err, fallbackTitle = 'Gagal Menyimpan', fallbackMsg = 'Terjadi kesalahan sistem saat menyimpan data.') {
+    const msg = err?.message || fallbackMsg;
+    showNotificationModal(fallbackTitle, msg, '❌', 'error');
 }
 
 let currentRole = 'visitor'; // 'visitor' | 'user' | 'admin'
@@ -86,10 +130,19 @@ function getCalculatedReadyStock() {
     // 2. Automatically subtract completed/active orders (excluding PO & Cancelled)
     orders.forEach(o => {
         if (o.status !== 'po' && o.paymentStatus !== 'Batal') {
-            const qtyEggs = o.totalEggs || 0;
+            let qtyEggs = o.totalEggs || o.total_eggs || 0;
+            if (!qtyEggs) {
+                const q = o.qty || o.quantity || 0;
+                if (o.unit === 'pack') {
+                    qtyEggs = q * 10;
+                } else {
+                    qtyEggs = q;
+                }
+            }
+
             if (o.category === 'negeri') {
                 stockNegeri -= qtyEggs;
-            } else if (o.category === 'kampung') {
+            } else if (o.category === 'kampung' || o.category === 'reward') {
                 stockKampung -= qtyEggs;
             }
         }
@@ -131,14 +184,21 @@ async function initApp() {
     updateRoleVisibility();
     showCenterWelcome();
 
+    // Reveal bottom nav immediately after role visibility is computed (synchronous, always fires)
+    document.body.classList.add('app-loaded');
+
     // Initial render from local
     renderPanenData();
     updateDashboardData();
     renderTokoData();
     renderTokoOrdersData();
 
-    // Init QRIS Image Setting
-    const savedQrisUrl = localStorage.getItem('huma_farm_qris_image') || 'images/qris_huma_farm.png';
+    // Init QRIS Image Setting - normalize any old absolute URL from localStorage
+    const rawSavedQris = localStorage.getItem('huma_farm_qris_image') || 'images/qris_huma_farm.png';
+    const savedQrisUrl = normalizeQrisImageUrl(rawSavedQris);
+    if (savedQrisUrl !== rawSavedQris) {
+        localStorage.setItem('huma_farm_qris_image', savedQrisUrl); // Update with normalized path
+    }
     const qrisImg = document.getElementById('qris-img-element');
     if (qrisImg) qrisImg.src = savedQrisUrl;
     const qrisInput = document.getElementById('setting-qris-url');
@@ -161,7 +221,7 @@ async function initApp() {
     const bsiLabelEl = document.getElementById('pay-bsi-bank-name');
     if (bsiNumEl) bsiNumEl.textContent = savedBankNumber;
     if (bsiOwnerEl) bsiOwnerEl.textContent = savedBankOwner;
-    if (bsiLabelEl) bsiLabelEl.textContent = savedBankName;
+    if (bsiLabelEl) bsiLabelEl.textContent = `🏦 TRANSFER ${savedBankName.toUpperCase()}`;
 
     // Init QRIS Merchant
     const savedMerchant = localStorage.getItem('huma_farm_qris_merchant') || 'Huma Farm';
@@ -174,6 +234,7 @@ async function initApp() {
     fetchCloudData();
     setupSupabaseRealtime();
 }
+
 
 
 // ----------------------------------------------------
@@ -230,8 +291,10 @@ async function fetchCloudData() {
 
             // 4. Sync Expenses
             if (res.expenses) {
+                const knownIncomeCategories = ['Injeksi Modal', 'Penjualan Off-Grid', 'Penjualan Afkir', 'Subsidi / Lainnya', 'Pemasukan Kas'];
                 const cloudExp = res.expenses.map(e => ({
                     id: String(e.id),
+                    type: e.type || (knownIncomeCategories.includes(e.category) ? 'income' : 'expense'),
                     category: e.category,
                     amount: parseFloat(e.amount),
                     note: e.note || '',
@@ -252,7 +315,7 @@ async function fetchCloudData() {
                 localStorage.setItem('huma_farm_bank_number', res.settings.bank_number);
                 localStorage.setItem('huma_farm_bank_owner', res.settings.bank_owner);
                 localStorage.setItem('huma_farm_qris_merchant', res.settings.qris_merchant);
-                localStorage.setItem('huma_farm_qris_image', res.settings.qris_image_url);
+                localStorage.setItem('huma_farm_qris_image', normalizeQrisImageUrl(res.settings.qris_image_url));
 
                 // Update UI settings elements
                 const bankNameInput = document.getElementById('setting-bank-name');
@@ -273,12 +336,18 @@ async function fetchCloudData() {
                 const bsiLabelEl = document.getElementById('pay-bsi-bank-name');
                 if (bsiNumEl) bsiNumEl.textContent = res.settings.bank_number;
                 if (bsiOwnerEl) bsiOwnerEl.textContent = res.settings.bank_owner;
-                if (bsiLabelEl) bsiLabelEl.textContent = res.settings.bank_name;
+                if (bsiLabelEl) bsiLabelEl.textContent = `🏦 TRANSFER ${res.settings.bank_name.toUpperCase()}`;
 
                 const qrisImg = document.getElementById('qris-img-element');
-                if (qrisImg) qrisImg.src = res.settings.qris_image_url;
+                if (qrisImg) {
+                    let finalQrSrc = normalizeQrisImageUrl(res.settings.qris_image_url) || 'images/qris_huma_farm.png';
+                    if (finalQrSrc.startsWith('000201')) {
+                        finalQrSrc = 'https://api.qrserver.com/v1/create-qr-code/?size=350x350&data=' + encodeURIComponent(finalQrSrc);
+                    }
+                    qrisImg.src = finalQrSrc;
+                }
                 const merchantLabel = document.getElementById('pay-qris-merchant');
-                if (merchantLabel) merchantLabel.textContent = res.settings.qris_merchant;
+                if (merchantLabel) merchantLabel.textContent = `📱 SCAN QRIS (${res.settings.qris_merchant.toUpperCase()})`;
             }
 
             // Render all UI components
@@ -450,7 +519,7 @@ async function handleSaveTokoPricingSubmit(e) {
         );
     } catch (err) {
         console.error('API save prices error:', err);
-        showNotificationModal('Gagal Menyimpan', 'Gagal memperbarui harga di server.', '❌', 'error');
+        handleCrudError(err, 'Gagal Menyimpan', 'Gagal memperbarui harga di server.');
     }
 }
 
@@ -478,6 +547,15 @@ function showNotificationModal(title, message, icon = '🎉', type = 'info') {
         } else {
             iconBox.style.background = 'rgba(217, 119, 6, 0.15)';
             iconBox.style.borderColor = 'var(--ranch-amber)';
+        }
+    }
+
+    const btnEl = document.getElementById('sys-notif-btn');
+    if (btnEl) {
+        if (title && title.startsWith('Sedang')) {
+            btnEl.style.display = 'none';
+        } else {
+            btnEl.style.display = 'block';
         }
     }
 
@@ -580,6 +658,7 @@ function handleTopbarUserBadgeClick() {
 }
 
 function updateRoleVisibility() {
+    document.documentElement.setAttribute('data-user-role', currentRole);
     const adminTabs = document.querySelectorAll('[data-role="admin"]');
     const userTabs = document.querySelectorAll('[data-role="user"]');
     const visitorTabs = document.querySelectorAll('[data-role="visitor"]');
@@ -595,6 +674,9 @@ function updateRoleVisibility() {
     const logoutBtn = document.getElementById('logout-btn');
     const tokoPricingBtn = document.getElementById('btn-toko-pricing');
 
+    // Retrieve previously selected page from sessionStorage
+    let targetPage = sessionStorage.getItem('huma_farm_active_page');
+
     if (currentRole === 'admin') {
         adminTabs.forEach(el => el.style.display = '');
         const adminPaymentCard = document.getElementById('admin-payment-setting-card');
@@ -605,9 +687,12 @@ function updateRoleVisibility() {
         if (visitorWaBanner) visitorWaBanner.style.display = 'none';
         if (visitorLoginHint) visitorLoginHint.style.display = 'none';
 
-        if (userBadge) userBadge.style.display = 'flex';
         const adminAvatar = localStorage.getItem('huma_farm_admin_avatar') || '👑';
-        if (avatarImg) avatarImg.textContent = adminAvatar;
+        const adminAvatarBg = localStorage.getItem('huma_farm_admin_avatar_bg') || 'linear-gradient(135deg, #f59e0b, #d97706)';
+        if (avatarImg) {
+            avatarImg.textContent = adminAvatar;
+            avatarImg.style.background = adminAvatarBg;
+        }
         if (userNameEl) userNameEl.textContent = 'Bos Admin';
 
         const walletBtn = document.getElementById('topbar-wallet-btn');
@@ -619,7 +704,7 @@ function updateRoleVisibility() {
         const dashCharts = document.getElementById('dash-charts-section');
         if (dashCharts) dashCharts.style.display = 'block';
 
-        if (settingsBtn) settingsBtn.style.display = 'inline-flex';
+        if (settingsBtn) settingsBtn.style.display = 'none';
         if (logoutBtn) logoutBtn.style.display = 'inline-flex';
         if (tokoPricingBtn) tokoPricingBtn.style.display = 'inline-flex';
 
@@ -628,7 +713,12 @@ function updateRoleVisibility() {
         if (loginBtn) loginBtn.style.display = 'none';
 
         loadSettingsPageData();
-        switchPage('panenku');
+
+        // Validate and apply targetPage (default fallback is 'panenku')
+        if (!targetPage) {
+            targetPage = 'panenku';
+        }
+        switchPage(targetPage);
 
     } else if (currentRole === 'user' && currentUser) {
         adminTabs.forEach(el => el.style.display = 'none');
@@ -660,7 +750,12 @@ function updateRoleVisibility() {
         if (loginBtn) loginBtn.style.display = 'none';
 
         loadSettingsPageData();
-        switchPage('toko');
+
+        // Validate and apply targetPage (default fallback is 'toko')
+        if (!targetPage || ['panenku', 'keuangan'].includes(targetPage)) {
+            targetPage = 'toko';
+        }
+        switchPage(targetPage);
 
     } else {
         adminTabs.forEach(el => el.style.display = 'none');
@@ -692,9 +787,12 @@ function updateRoleVisibility() {
         const loginBtn = document.getElementById('topbar-login-btn');
         if (loginBtn) loginBtn.style.display = 'inline-flex';
 
-        switchPage('edukasi'); // VISITORS OPEN EDUKASI PAGE BY DEFAULT
+        // Validate and apply targetPage (default fallback is 'edukasi')
+        if (!targetPage || ['panenku', 'keuangan', 'pengaturan'].includes(targetPage)) {
+            targetPage = 'edukasi';
+        }
+        switchPage(targetPage);
     }
-
 
     updateCenterActionTab();
 }
@@ -754,6 +852,8 @@ function switchPage(pageId) {
         openUnifiedAuthModal('login');
         return;
     }
+
+    sessionStorage.setItem('huma_farm_active_page', pageId);
 
     document.querySelectorAll('.mobile-nav-item').forEach(el => el.classList.remove('active'));
     
@@ -822,6 +922,24 @@ function handleCenterFabClick() {
 }
 
 // ============================================================
+// ORDER ACCORDION TOGGLE
+// ============================================================
+function toggleOrderAccordion(headerEl) {
+    if (!headerEl) return;
+    const item = headerEl.closest('.order-accordion-item');
+    if (!item) return;
+    const isAlreadyActive = item.classList.contains('active');
+
+    document.querySelectorAll('.order-accordion-item').forEach(el => {
+        el.classList.remove('active');
+    });
+
+    if (!isAlreadyActive) {
+        item.classList.add('active');
+    }
+}
+
+// ============================================================
 // ORDER FORM v3 - MULTI PACK + ECERAN SUPPORT PER EGG TYPE
 // ============================================================
 
@@ -830,25 +948,27 @@ let orderQtyNegeriEgg = 0;
 let orderQtyKampungPack = 0;
 let orderQtyKampungEgg = 0;
 
-function openQuickUserOrderModal() {
+function openQuickUserOrderModal(preserveData = false) {
     const modal = document.getElementById('modal-user-order');
     if (!modal) return;
 
-    // Reset state
-    orderQtyNegeriPack = 0;
-    orderQtyNegeriEgg = 0;
-    orderQtyKampungPack = 0;
-    orderQtyKampungEgg = 0;
+    if (!preserveData) {
+        // Reset state
+        orderQtyNegeriPack = 0;
+        orderQtyNegeriEgg = 0;
+        orderQtyKampungPack = 0;
+        orderQtyKampungEgg = 0;
+    }
 
-    // Reset UI inputs
+    // Set UI inputs
     const np = document.getElementById('order-qty-negeri-pack');
     const ne = document.getElementById('order-qty-negeri-egg');
     const kp = document.getElementById('order-qty-kampung-pack');
     const ke = document.getElementById('order-qty-kampung-egg');
-    if (np) np.value = '0';
-    if (ne) ne.value = '0';
-    if (kp) kp.value = '0';
-    if (ke) ke.value = '0';
+    if (np) np.value = orderQtyNegeriPack.toString();
+    if (ne) ne.value = orderQtyNegeriEgg.toString();
+    if (kp) kp.value = orderQtyKampungPack.toString();
+    if (ke) ke.value = orderQtyKampungEgg.toString();
 
     // Buyer row & Phone row handling
     const buyerRow = document.getElementById('order-buyer-row');
@@ -865,7 +985,7 @@ function openQuickUserOrderModal() {
             buyerInput.style.opacity = '1';
             buyerInput.style.cursor = 'text';
             buyerInput.placeholder = 'Cari nama user atau ketik manual...';
-            buyerInput.value = '';
+            if (!preserveData) buyerInput.value = '';
         } else if (currentRole === 'user' && currentUser) {
             buyerInput.readOnly = true;
             buyerInput.style.opacity = '0.85';
@@ -876,15 +996,63 @@ function openQuickUserOrderModal() {
             buyerInput.style.opacity = '1';
             buyerInput.style.cursor = 'text';
             buyerInput.placeholder = 'Masukkan nama lengkap Anda...';
-            buyerInput.value = '';
+            if (!preserveData && (!buyerInput.value || buyerInput.value.trim() === '')) {
+                if (currentUser && currentUser.name) {
+                    buyerInput.value = currentUser.name;
+                } else {
+                    buyerInput.value = '';
+                }
+            }
         }
     }
 
-    if (phoneInput) {
+    if (phoneInput && !preserveData) {
         if (currentUser && currentUser.phone) {
             phoneInput.value = currentUser.phone;
         } else {
             phoneInput.value = '';
+        }
+    }
+
+    // Restore buyerName and buyerPhone if preserveData is true and pendingOrderData exists
+    if (preserveData && pendingOrderData) {
+        if (buyerInput && pendingOrderData.buyerName) buyerInput.value = pendingOrderData.buyerName;
+        if (phoneInput && pendingOrderData.buyerPhone) phoneInput.value = pendingOrderData.buyerPhone;
+    }
+
+    // Show/hide custom transaction date for Admin
+    const adminDateRow = document.getElementById('admin-order-date-row');
+    const dateInput = document.getElementById('quick-order-date-input');
+    if (adminDateRow) {
+        if (currentRole === 'admin') {
+            adminDateRow.style.display = 'block';
+            if (dateInput && !preserveData) {
+                const now = new Date();
+                const tzoffset = now.getTimezoneOffset() * 60000;
+                const localISOTime = (new Date(now - tzoffset)).toISOString().slice(0, 16);
+                dateInput.value = localISOTime;
+            }
+        } else {
+            adminDateRow.style.display = 'none';
+        }
+    }
+
+    // Show/hide reward box for Admin
+    const rewardContainer = document.getElementById('admin-reward-container');
+    if (rewardContainer) {
+        if (currentRole === 'admin') {
+            rewardContainer.style.display = 'block';
+            if (!preserveData) {
+                const rNegeri = document.getElementById('reward-type-negeri');
+                if (rNegeri) {
+                    rNegeri.checked = true;
+                    rNegeri.dispatchEvent(new Event('change'));
+                }
+                const rQty = document.getElementById('quick-order-reward-qty');
+                if (rQty) rQty.value = '0';
+            }
+        } else {
+            rewardContainer.style.display = 'none';
         }
     }
 
@@ -909,14 +1077,27 @@ function openQuickUserOrderModal() {
     if (packKampungEl) packKampungEl.textContent = `${packK} Pack`;
     if (eggKampungEl)  eggKampungEl.textContent  = `${eggK} Butir`;
 
-    // Warning + button reset
-    const warn = document.getElementById('order-stock-warning');
-    if (warn) warn.style.display = 'none';
-    const priceSum = document.getElementById('order-price-summary');
-    if (priceSum) priceSum.style.display = 'none';
+    // Recalculate summary and button state if preserving data
+    if (preserveData) {
+        onOrderQtyInput();
+    } else {
+        const warn = document.getElementById('order-stock-warning');
+        if (warn) warn.style.display = 'none';
+        const priceSum = document.getElementById('order-price-summary');
+        if (priceSum) priceSum.style.display = 'none';
 
-    const btn = document.getElementById('order-submit-btn');
-    if (btn) { btn.disabled = true; btn.innerHTML = 'Lanjut ke Pembayaran ➔'; btn.classList.remove('btn-po'); btn.classList.add('btn-ranch'); }
+        const btn = document.getElementById('order-submit-btn');
+        if (btn) {
+            btn.disabled = true;
+            if (currentRole === 'admin') {
+                btn.innerHTML = '📥 Input Pesanan';
+            } else {
+                btn.innerHTML = 'Lanjut ke Pembayaran ➔';
+            }
+            btn.classList.remove('btn-po');
+            btn.classList.add('btn-ranch');
+        }
+    }
 
     modal.classList.add('active');
 }
@@ -970,7 +1151,12 @@ function refreshOrderStockStatus() {
     const totalItems = orderQtyNegeriPack + orderQtyNegeriEgg + orderQtyKampungPack + orderQtyKampungEgg;
 
     if (totalItems === 0) {
-        if (btn) { btn.disabled = true; btn.innerHTML = '🛒 Pesan via WhatsApp'; btn.classList.remove('btn-po'); btn.classList.add('btn-ranch'); }
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = currentRole === 'admin' ? '📥 Input Pesanan' : 'Lanjut ke Pembayaran ➔';
+            btn.classList.remove('btn-po');
+            btn.classList.add('btn-ranch');
+        }
         if (warn) warn.style.display = 'none';
         if (priceSummary) priceSummary.style.display = 'none';
         return;
@@ -1034,39 +1220,104 @@ function refreshOrderStockStatus() {
         if (shortN > 0) msgs.push(`Negeri kurang ${shortN} butir`);
         if (shortK > 0) msgs.push(`Kampung kurang ${shortK} butir`);
         if (warn) warn.style.display = 'flex';
-        if (warnText) warnText.textContent = '⚠️ Stok kurang (' + msgs.join(', ') + '). Silakan ajukan Pre-Order via WhatsApp.';
-        if (btn) { btn.disabled = false; btn.innerHTML = '📋 Ajukan PO via WhatsApp'; btn.classList.add('btn-po'); btn.classList.remove('btn-ranch'); }
+        if (warnText) warnText.textContent = '⚠️ Stok kurang (' + msgs.join(', ') + '). Silakan ajukan Pre-Order.';
+        if (btn) {
+            btn.disabled = false;
+            if (currentRole === 'admin') {
+                btn.innerHTML = '📥 Input Pesanan';
+                btn.classList.remove('btn-po');
+                btn.classList.add('btn-ranch');
+            } else {
+                btn.innerHTML = '📋 Ajukan PO via WhatsApp';
+                btn.classList.add('btn-po');
+                btn.classList.remove('btn-ranch');
+            }
+        }
     } else {
         if (warn) warn.style.display = 'none';
-        if (btn) { btn.disabled = false; btn.innerHTML = '🛒 Pesan via WhatsApp'; btn.classList.remove('btn-po'); btn.classList.add('btn-ranch'); }
+        if (btn) {
+            btn.disabled = false;
+            if (currentRole === 'admin') {
+                btn.innerHTML = '📥 Input Pesanan';
+            } else {
+                btn.innerHTML = 'Lanjut ke Pembayaran ➔';
+            }
+            btn.classList.remove('btn-po');
+            btn.classList.add('btn-ranch');
+        }
     }
 }
 
-// ADMIN: Buyer name search
+function escapeJsString(str) {
+    return (str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
+}
+
+function escapeHtml(str) {
+    return (str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+// ADMIN: Buyer name search with phone auto-populate from historical orders
 function handleOrderBuyerSearch(query) {
+    if (currentRole !== 'admin') return;
     const dd = document.getElementById('order-buyer-dropdown');
     if (!dd) return;
-    if (!query || query.length < 1) { dd.style.display = 'none'; return; }
+    if (!query || query.trim().length < 1) { dd.style.display = 'none'; return; }
 
-    const registeredUsers = JSON.parse(localStorage.getItem('huma_farm_registered_users') || '[]');
-    const matches = registeredUsers.filter(u => u.name && u.name.toLowerCase().includes(query.toLowerCase()));
+    const matchesMap = new Map();
+    const lowerQ = query.toLowerCase().trim();
 
-    if (matches.length === 0) { dd.style.display = 'none'; return; }
+    // Check orders from local storage (MURNI DARI RIWAYAT PESANAN)
+    try {
+        const localOrders = JSON.parse(localStorage.getItem('huma_farm_orders') || '[]');
+        localOrders.forEach(o => {
+            const name = (o.buyerName || o.buyer_name || o.name || '').trim();
+            const phone = (o.buyerPhone || o.buyer_phone || o.phone || '').trim();
+            if (name && name.toLowerCase() !== 'pengunjung' && name.toLowerCase() !== 'visitor') {
+                const key = name.toLowerCase();
+                if (!matchesMap.has(key)) {
+                    matchesMap.set(key, { name: name, phone: phone });
+                }
+            }
+        });
+    } catch (e) {}
 
-    dd.innerHTML = matches.slice(0, 6).map(u =>
-        `<div class="order-buyer-option" onclick="selectOrderBuyer('${u.name.replace(/'/g, "\\'")}')">
-            <span class="buyer-opt-avatar">${u.avatar || '👤'}</span>
-            <span class="buyer-opt-name">${u.name}</span>
-        </div>`
-    ).join('');
+    const matchesList = Array.from(matchesMap.values()).filter(b => b.name.toLowerCase().includes(lowerQ));
+
+    if (matchesList.length === 0) {
+        dd.style.display = 'none';
+        return;
+    }
+
+    let html = '';
+    matchesList.slice(0, 6).forEach(m => {
+        const phoneLabel = m.phone ? ` (${m.phone})` : '';
+        html += `<div class="order-buyer-option" style="padding: 8px 10px; cursor: pointer; border-bottom: 1px dashed var(--border-color); font-size: 0.76rem; color: var(--text-main); background: var(--bg-card);"
+                      onclick="selectOrderBuyerResult('${escapeJsString(m.name)}', '${escapeJsString(m.phone)}')">
+                    <strong style="color: var(--text-main);">👤 ${escapeHtml(m.name)}</strong><span style="color: var(--ranch-amber); font-size: 0.7rem; margin-left: 4px;">${escapeHtml(phoneLabel)}</span>
+                 </div>`;
+    });
+
+    dd.innerHTML = html;
     dd.style.display = 'block';
 }
 
-function selectOrderBuyer(name) {
-    const input = document.getElementById('quick-order-buyer-input');
-    if (input) input.value = name;
+function selectOrderBuyerResult(name, phone) {
+    const inp = document.getElementById('quick-order-buyer-input');
+    const phoneInp = document.getElementById('quick-order-phone-input');
     const dd = document.getElementById('order-buyer-dropdown');
+
+    if (inp) inp.value = name;
+    if (phoneInp && phone) phoneInp.value = phone;
     if (dd) dd.style.display = 'none';
+}
+
+function selectOrderBuyer(name, phone) {
+    selectOrderBuyerResult(name, phone);
 }
 
 let pendingOrderData = null;
@@ -1085,7 +1336,51 @@ function anonymizeBuyerName(name) {
     }).join(' ');
 }
 
-function handleQuickUserOrderStep1Submit(e) {
+function formatPhoneNumberForWa(phone) {
+    if (!phone) return '';
+    let cleaned = phone.replace(/\D/g, '');
+    if (cleaned.startsWith('0')) {
+        cleaned = '62' + cleaned.substring(1);
+    } else if (cleaned.startsWith('8')) {
+        cleaned = '62' + cleaned;
+    }
+    return cleaned;
+}
+
+function getAdminPhoneNumber() {
+    const savedAdminPhone = localStorage.getItem('huma_farm_admin_phone');
+    if (savedAdminPhone) {
+        const formatted = formatPhoneNumberForWa(savedAdminPhone);
+        if (formatted) return formatted;
+    }
+    const registeredUsers = JSON.parse(localStorage.getItem('huma_farm_registered_users') || '[]');
+    const adminUser = registeredUsers.find(u => u && u.role === 'admin');
+    if (adminUser && adminUser.phone) {
+        const formatted = formatPhoneNumberForWa(adminUser.phone);
+        if (formatted) return formatted;
+    }
+    return '6282299336676';
+}
+
+function getBaseOrderId(id) {
+    if (!id) return '';
+    // Strip leading '#' so '#ORD-55554' and 'ORD-55554' group together
+    const cleanId = id.startsWith('#') ? id.substring(1) : id;
+    const match = cleanId.match(/^(ORD-\d+)/i);
+    if (match) {
+        return match[1].toUpperCase();
+    }
+    const idx = cleanId.lastIndexOf('-');
+    if (idx !== -1) {
+        const suffix = cleanId.substring(idx);
+        if (suffix === '-R' || suffix.match(/^-\d+$/) || suffix.match(/^-[A-Z]+$/)) {
+            return cleanId.substring(0, idx);
+        }
+    }
+    return cleanId;
+}
+
+async function handleQuickUserOrderStep1Submit(e) {
     e.preventDefault();
 
     const totalItems = orderQtyNegeriPack + orderQtyNegeriEgg + orderQtyKampungPack + orderQtyKampungEgg;
@@ -1133,7 +1428,76 @@ function handleQuickUserOrderStep1Submit(e) {
     }
 
     const randomSuffix = Math.floor(10000 + Math.random() * 90000);
-    const orderId = `#ORD-${randomSuffix}`;
+    const orderId = `ORD-${randomSuffix}`;
+
+    // Admin direct submit handling
+    if (currentRole === 'admin') {
+        const rewardQty = parseInt(document.getElementById('quick-order-reward-qty').value) || 0;
+        const rewardType = document.querySelector('input[name="reward_egg_type"]:checked').value;
+        if (rewardQty > 0) {
+            itemsToProcess.push({ category: rewardType, unit: 'egg', qty: rewardQty, isReward: true });
+            const rewardName = rewardType === 'negeri' ? 'Telur Negeri' : 'Telur Kampung';
+            orderDescArr.push(`[Bonus] ${rewardName}: ${rewardQty} Butir`);
+        }
+
+        showNotificationModal('Mengirim Pesanan...', 'Menyimpan pesanan ke database farm...', '☁️', 'info');
+
+        try {
+            let itemIndex = 1;
+            for (const item of itemsToProcess) {
+                let itemTotalPrice = 0;
+                if (!item.isReward) {
+                    const pricePerUnit = (item.category === 'negeri') 
+                        ? (item.unit === 'pack' ? prices.negeriPack : prices.negeriEgg)
+                        : (item.unit === 'pack' ? prices.kampungPack : prices.kampungEgg);
+                    itemTotalPrice = item.qty * pricePerUnit;
+                }
+
+                const suffix = item.isReward ? '-R' : `-${itemIndex++}`;
+                const uniqueItemId = `${orderId}${suffix}`;
+
+                const postPayload = {
+                    id: uniqueItemId,
+                    buyer_name: buyerName,
+                    buyer_phone: buyerPhone,
+                    category: item.category,
+                    unit: item.unit,
+                    qty: item.qty,
+                    total_price: itemTotalPrice,
+                    payment_status: 'Menunggu Konfirmasi'
+                };
+
+                const customDateVal = document.getElementById('quick-order-date-input').value;
+                if (customDateVal) {
+                    postPayload.created_at = customDateVal;
+                }
+
+                await apiRequest('/orders', 'POST', postPayload);
+            }
+
+            await fetchCloudData();
+            closeQuickUserOrderModal();
+            closeSystemNotificationModal();
+
+            pendingOrderData = {
+                orderId,
+                buyerName,
+                buyerPhone,
+                orderDescArr,
+                grandTotal,
+                itemsToProcess,
+                isAdminCreated: true
+            };
+
+            openPaymentModal(orderId, buyerName, buyerPhone, orderDescArr, grandTotal, itemsToProcess);
+
+        } catch (err) {
+            closeSystemNotificationModal();
+            console.error('API admin order submit error:', err);
+            handleCrudError(err, 'Gagal Mengirim Pesanan', 'Gagal menghubungi server database. Silakan coba lagi.');
+        }
+        return;
+    }
 
     pendingOrderData = {
         orderId,
@@ -1141,31 +1505,30 @@ function handleQuickUserOrderStep1Submit(e) {
         buyerPhone,
         orderDescArr,
         grandTotal,
-        itemsToProcess
+        itemsToProcess,
+        isAdminCreated: false
     };
 
     closeQuickUserOrderModal();
 
-    // Populate Modal Payment Instructions
+    // Populate Modal Payment Instructions / Nota Pemesanan
+    openPaymentModal(orderId, buyerName, buyerPhone, orderDescArr, grandTotal, itemsToProcess);
+}
+
+function openPaymentModal(orderId, buyerName, buyerPhone, orderDescArr, grandTotal, itemsToProcess) {
     const modalIdEl = document.getElementById('pay-modal-order-id');
     const modalNameEl = document.getElementById('pay-modal-buyer-name');
     const modalPhoneEl = document.getElementById('pay-modal-buyer-phone');
     const modalDescEl = document.getElementById('pay-modal-order-desc');
     const modalTotalEl = document.getElementById('pay-modal-total-amount');
 
-    if (modalIdEl) modalIdEl.textContent = orderId;
+    if (modalIdEl) modalIdEl.textContent = orderId.startsWith('#') ? orderId : '#' + orderId;
     if (modalNameEl) modalNameEl.textContent = buyerName;
     if (modalPhoneEl) modalPhoneEl.textContent = buyerPhone || '-';
     if (modalDescEl) modalDescEl.textContent = orderDescArr.join(' + ');
     if (modalTotalEl) modalTotalEl.textContent = 'Rp ' + grandTotal.toLocaleString('id-ID');
 
-    // DYNAMIC QRIS & BANK POPULATE FROM LATEST SETTINGS
-    const savedQrisUrl = localStorage.getItem('huma_farm_qris_image') || 'images/qris_huma_farm.png';
-    const savedMerchant = localStorage.getItem('huma_farm_qris_merchant') || 'Huma Farm';
-    const qrisImg = document.getElementById('qris-img-element');
-    const merchantLabel = document.getElementById('pay-qris-merchant');
-    if (qrisImg) qrisImg.src = savedQrisUrl;
-    if (merchantLabel) merchantLabel.textContent = `📱 QRIS ${savedMerchant}`;
+    updateDynamicQrisInPaymentModal(grandTotal);
 
     const savedBankName = localStorage.getItem('huma_farm_bank_name') || 'BSI';
     const savedBankNumber = localStorage.getItem('huma_farm_bank_number') || '7367004597';
@@ -1175,81 +1538,581 @@ function handleQuickUserOrderStep1Submit(e) {
     const bsiLabelEl = document.getElementById('pay-bsi-bank-name');
     if (bsiNumEl) bsiNumEl.textContent = savedBankNumber;
     if (bsiOwnerEl) bsiOwnerEl.textContent = savedBankOwner;
-    if (bsiLabelEl) bsiLabelEl.textContent = `🏦 ${savedBankName}`;
+    if (bsiLabelEl) bsiLabelEl.textContent = `🏦 TRANSFER ${savedBankName}`;
 
-    // Default to BSI payment view
     selectPaymentMethod('bsi');
 
     const modalPay = document.getElementById('modal-payment-instructions');
     if (modalPay) modalPay.classList.add('active');
 }
 
-function selectPaymentMethod(method) {
-    const bsiBox = document.getElementById('bsi-payment-box');
-    const qrisBox = document.getElementById('qris-payment-box');
-    const labelBsi = document.getElementById('label-pay-bsi');
-    const labelQris = document.getElementById('label-pay-qris');
+function calculateQrisCRC16(str) {
+    let crc = 0xFFFF;
+    for (let i = 0; i < str.length; i++) {
+        crc ^= (str.charCodeAt(i) << 8);
+        for (let j = 0; j < 8; j++) {
+            if ((crc & 0x8000) !== 0) {
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF;
+            } else {
+                crc = (crc << 1) & 0xFFFF;
+            }
+        }
+    }
+    let hex = (crc & 0xFFFF).toString(16).toUpperCase();
+    return hex.padStart(4, '0');
+}
 
-    if (method === 'qris') {
-        if (bsiBox) bsiBox.style.display = 'none';
-        if (qrisBox) qrisBox.style.display = 'block';
-        if (labelBsi) labelBsi.classList.remove('selected');
-        if (labelQris) labelQris.classList.add('selected');
-    } else {
-        if (bsiBox) bsiBox.style.display = 'block';
-        if (qrisBox) qrisBox.style.display = 'none';
-        if (labelBsi) labelBsi.classList.add('selected');
-        if (labelQris) labelQris.classList.remove('selected');
+function parseQrisTLV(payloadStr) {
+    let payload = payloadStr.trim();
+    if (payload.includes('6304')) {
+        payload = payload.substring(0, payload.lastIndexOf('6304'));
+    }
+    const tags = [];
+    let idx = 0;
+    while (idx < payload.length) {
+        if (idx + 4 > payload.length) break;
+        const tag = payload.substring(idx, idx + 2);
+        const len = parseInt(payload.substring(idx + 2, idx + 4), 10);
+        if (isNaN(len) || idx + 4 + len > payload.length) break;
+        const val = payload.substring(idx + 4, idx + 4 + len);
+        tags.push({ tag, len, val });
+        idx += 4 + len;
+    }
+    return tags;
+}
+
+function generateDynamicQrisPayload(rawPayload, amount) {
+    if (!rawPayload || typeof rawPayload !== 'string') return '';
+    let payload = rawPayload.trim();
+
+    if (payload.startsWith('http://') || payload.startsWith('https://') || payload.startsWith('data:image')) {
+        return payload;
+    }
+
+    const amountNum = Math.round(Number(amount) || 0);
+    if (amountNum <= 0) return payload;
+
+    const amtValStr = amountNum + '.00';
+    const tags = parseQrisTLV(payload);
+    if (tags.length === 0) return payload;
+
+    const newTags = [];
+    let found54 = false;
+
+    for (const item of tags) {
+        if (item.tag === '01') {
+            newTags.push({ tag: '01', len: 2, val: '12' });
+        } else if (item.tag === '54') {
+            newTags.push({ tag: '54', len: amtValStr.length, val: amtValStr });
+            found54 = true;
+        } else {
+            newTags.push(item);
+            if (item.tag === '53' && !found54) {
+                newTags.push({ tag: '54', len: amtValStr.length, val: amtValStr });
+                found54 = true;
+            }
+        }
+    }
+
+    if (!found54) {
+        newTags.push({ tag: '54', len: amtValStr.length, val: amtValStr });
+    }
+
+    let reconstructed = '';
+    for (const t of newTags) {
+        const lenStr = t.len.toString().padStart(2, '0');
+        reconstructed += t.tag + lenStr + t.val;
+    }
+
+    reconstructed += '6304';
+    const crc = calculateQrisCRC16(reconstructed);
+    return reconstructed + crc;
+}
+
+function updateDynamicQrisInPaymentModal(grandTotal) {
+    const savedQrisImage = localStorage.getItem('huma_farm_qris_image') || '';
+    const savedMerchant = localStorage.getItem('huma_farm_qris_merchant') || 'Huma Farm';
+    const qrisImg = document.getElementById('qris-img-element');
+    const merchantLabel = document.getElementById('pay-qris-merchant');
+
+    if (merchantLabel) merchantLabel.textContent = `📱 SCAN QRIS (${savedMerchant.toUpperCase()})`;
+
+    if (!qrisImg) return;
+
+    // Step 1: Immediately show local fallback so QR area is never blank
+    qrisImg.src = 'images/qris_huma_farm.png';
+    qrisImg.style.opacity = '1';
+
+    // Step 2: If a server-uploaded QRIS image exists, try to swap it in
+    if (savedQrisImage && !savedQrisImage.startsWith('000201')) {
+        const testImg = new Image();
+        testImg.onload = function() {
+            // Server image loaded successfully - use it
+            qrisImg.src = savedQrisImage;
+            qrisImg.style.opacity = '1';
+        };
+        testImg.onerror = function() {
+            // Server image failed - keep the local fallback already shown
+            console.warn('QRIS server image failed to load, using local fallback.');
+        };
+        // Timeout: if server doesn't respond in 2s, abort silently
+        setTimeout(() => { testImg.src = ''; }, 2000);
+        testImg.src = savedQrisImage;
+    } else if (savedQrisImage && savedQrisImage.startsWith('000201')) {
+        // It's a raw QRIS string - generate QR via API
+        const apiSrc = 'https://api.qrserver.com/v1/create-qr-code/?size=350x350&data=' + encodeURIComponent(savedQrisImage);
+        const testImg = new Image();
+        testImg.onload = function() {
+            qrisImg.src = apiSrc;
+            qrisImg.style.opacity = '1';
+        };
+        testImg.onerror = function() {
+            console.warn('QR API image failed, using local fallback.');
+        };
+        setTimeout(() => { testImg.src = ''; }, 2000);
+        testImg.src = apiSrc;
     }
 }
 
-function closePaymentInstructionsModal() {
-    const modal = document.getElementById('modal-payment-instructions');
-    if (modal) modal.classList.remove('active');
+
+// Convert image URL to base64 via XHR (works for same-origin uploads without CORS issues)
+function imageUrlToBase64(url) {
+    return new Promise((resolve) => {
+        try {
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', url, true);
+            xhr.responseType = 'blob';
+            xhr.onload = function () {
+                if (xhr.status === 200) {
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result);
+                    reader.onerror = () => resolve(null);
+                    reader.readAsDataURL(xhr.response);
+                } else {
+                    resolve(null);
+                }
+            };
+            xhr.onerror = () => resolve(null);
+            xhr.send();
+        } catch (e) {
+            resolve(null);
+        }
+    });
 }
 
-async function executeOrderWithCountDown() {
-    if (!pendingOrderData) return;
+async function downloadQrisImage() {
+    const modalBox = document.getElementById('modal-payment-card-capture-target') || document.querySelector('#modal-payment-instructions .modal-box');
+    if (!modalBox) return;
 
-    const { orderId, buyerName, buyerPhone, orderDescArr, grandTotal, itemsToProcess } = pendingOrderData;
+    const qrisImg = document.getElementById('qris-img-element');
+    const originalSrc = qrisImg ? qrisImg.src : null;
 
-    // Determine chosen payment method
-    const selectedPay = document.querySelector('input[name="pay_choice"]:checked');
-    const payMethod = selectedPay ? selectedPay.value : 'bsi';
-    const payMethodText = payMethod === 'qris' 
-        ? '📱 QRIS Code (All E-Wallet)' 
-        : '🏦 Transfer Bank BSI (7367004597 a.n Mela Mufida)';
+    showNotificationModal('Mengunduh Nota Pemesanan...', 'Menyiapkan gambar nota...', '🖼️', 'info');
 
-    showNotificationModal('Mengirim Pesanan...', 'Menyimpan pesanan ke database farm...', '☁️', 'info');
+    // Convert QR image to base64 via XHR (bypasses all CORS restrictions for same-origin uploads)
+    let base64Src = null;
+    if (qrisImg && originalSrc) {
+        if (originalSrc.startsWith('data:')) {
+            base64Src = originalSrc;
+        } else {
+            base64Src = await imageUrlToBase64(originalSrc);
+        }
+    }
+
+    const orderIdEl = document.getElementById('pay-modal-order-id');
+    const cleanId = orderIdEl ? orderIdEl.textContent.trim().replace('#', '') : 'ORD';
+    const fileName = `HumaFarm_NotaPemesanan_${cleanId}.png`;
+
+    if (typeof html2canvas !== 'function') {
+        fallbackCanvasDownload();
+        return;
+    }
 
     try {
-        // Send all items to Laravel API
-        for (const item of itemsToProcess) {
-            const prices = getTokoPrices();
-            const pricePerUnit = (item.category === 'negeri') 
-                ? (item.unit === 'pack' ? prices.negeriPack : prices.negeriEgg)
-                : (item.unit === 'pack' ? prices.kampungPack : prices.kampungEgg);
-            const itemTotalPrice = item.qty * pricePerUnit;
+        const SCALE = 2.5;
 
-            await apiRequest('/orders', 'POST', {
-                buyer_name: buyerName,
-                buyer_phone: buyerPhone || '',
-                category: item.category,
-                unit: item.unit,
-                qty: item.qty,
-                total_price: itemTotalPrice
+        // Get QR img position relative to modalBox BEFORE html2canvas runs
+        let qrRect = null;
+        let modalRect = null;
+        if (qrisImg && base64Src) {
+            qrRect = qrisImg.getBoundingClientRect();
+            modalRect = modalBox.getBoundingClientRect();
+        }
+
+        // Run html2canvas, ignoring the QR img element entirely to avoid CORS blank
+        const canvas = await html2canvas(modalBox, {
+            scale: SCALE,
+            useCORS: false,
+            allowTaint: true,
+            backgroundColor: '#18181b',
+            logging: false,
+            imageTimeout: 0,
+            ignoreElements: (el) => el === qrisImg
+        });
+
+        // If we have QR base64 and position, paint it manually onto the canvas
+        if (qrRect && modalRect && base64Src) {
+            const ctx = canvas.getContext('2d');
+            const x = (qrRect.left - modalRect.left) * SCALE;
+            const y = (qrRect.top - modalRect.top) * SCALE;
+            const w = qrRect.width * SCALE;
+            const h = qrRect.height * SCALE;
+
+            await new Promise((resolve) => {
+                const img = new Image();
+                img.onload = () => {
+                    // White background for QR (matches white padding box in HTML)
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillRect(x, y, w, h);
+                    ctx.drawImage(img, x, y, w, h);
+                    resolve();
+                };
+                img.onerror = () => resolve(); // leave blank if fails
+                img.src = base64Src;
             });
         }
-        
-        // Pull latest sync state
-        await fetchCloudData();
-        closePaymentInstructionsModal();
 
-        // Construct WhatsApp Message
-        const orderDescStr = orderDescArr.map(d => `- ${d}`).join('\n');
-        const waMessage = `Halo Huma Farm! 🥚\nAku mau pesan telurnya ya!\n\n📌 *Order ID*: ${orderId}\n👤 *Pemesan*: ${buyerName}\n📱 *No. WA*: ${buyerPhone || '-'}\n\n📦 *Rincian Pesanan*:\n${orderDescStr}\n\n💳 *Total Tagihan*: Rp ${grandTotal.toLocaleString('id-ID')}\n💳 *Metode Pembayaran*: ${payMethodText}\n\nMohon konfirmasi pesanan saya ya! Terima kasih!`;
+        canvas.toBlob((blob) => {
+            if (!blob) {
+                console.error('toBlob returned null');
+                return;
+            }
+            const blobUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+            showNotificationModal('Nota Berhasil Diunduh!', `${fileName} tersimpan.`, '✅', 'success');
+        }, 'image/png');
+
+    } catch (err) {
+        console.error('html2canvas error:', err);
+        fallbackCanvasDownload();
+    }
+}
+
+function fallbackCanvasDownload() {
+    const qrisImg = document.getElementById('qris-img-element');
+    const orderIdEl = document.getElementById('pay-modal-order-id');
+    const buyerNameEl = document.getElementById('pay-modal-buyer-name');
+    const buyerPhoneEl = document.getElementById('pay-modal-buyer-phone');
+    const orderDescEl = document.getElementById('pay-modal-order-desc');
+    const totalAmountEl = document.getElementById('pay-modal-total-amount');
+    const merchantLabel = document.getElementById('pay-qris-merchant');
+
+    const orderId = orderIdEl ? orderIdEl.textContent.trim() : '#ORD-0000';
+    const buyerName = buyerNameEl ? buyerNameEl.textContent.trim() : '-';
+    const buyerPhone = buyerPhoneEl ? buyerPhoneEl.textContent.trim() : '-';
+    const orderDesc = orderDescEl ? orderDescEl.textContent.trim() : '-';
+    const totalAmount = totalAmountEl ? totalAmountEl.textContent.trim() : 'Rp 0';
+    const merchantName = merchantLabel ? merchantLabel.textContent.replace(/^📱\s*/, '').trim() : 'QRIS HUMA FARM';
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    const scale = 2;
+    const cardWidth = 560;
+    const cardHeight = 760;
+
+    canvas.width = cardWidth * scale;
+    canvas.height = cardHeight * scale;
+    ctx.scale(scale, scale);
+
+    // Background & Border
+    const bgGradient = ctx.createLinearGradient(0, 0, 0, cardHeight);
+    bgGradient.addColorStop(0, '#1c1917');
+    bgGradient.addColorStop(1, '#0c0a09');
+    ctx.fillStyle = bgGradient;
+    ctx.beginPath();
+    ctx.roundRect(0, 0, cardWidth, cardHeight, 20);
+    ctx.fill();
+
+    ctx.strokeStyle = '#f59e0b';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Header Title
+    ctx.fillStyle = '#f59e0b';
+    ctx.font = 'bold 15px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('🥚 HUMA FARM - TELUR OMEGA', 24, 40);
+
+    ctx.fillStyle = '#a1a1aa';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('Nota Pemesanan & Metode Pembayaran', 24, 60);
+
+    // Order ID Badge (positioned without overlapping title)
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.15)';
+    ctx.strokeStyle = '#f59e0b';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(cardWidth - 144, 24, 120, 30, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#f59e0b';
+    ctx.font = 'bold 13px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(orderId, cardWidth - 84, 44);
+
+    // Divider Line
+    ctx.strokeStyle = '#3f3f46';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(24, 76);
+    ctx.lineTo(cardWidth - 24, 76);
+    ctx.stroke();
+
+    // Order Details Box
+    ctx.fillStyle = '#27272a';
+    ctx.beginPath();
+    ctx.roundRect(24, 90, cardWidth - 48, 150, 12);
+    ctx.fill();
+    ctx.strokeStyle = '#3f3f46';
+    ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.font = '13px sans-serif';
+
+    ctx.fillStyle = '#a1a1aa';
+    ctx.fillText('Nama Pemesan:', 40, 116);
+    ctx.fillStyle = '#f4f4f5';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.fillText(buyerName, 160, 116);
+
+    ctx.font = '13px sans-serif';
+    ctx.fillStyle = '#a1a1aa';
+    ctx.fillText('No. WhatsApp:', 40, 140);
+    ctx.fillStyle = '#f4f4f5';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.fillText(buyerPhone, 160, 140);
+
+    ctx.font = '13px sans-serif';
+    ctx.fillStyle = '#a1a1aa';
+    ctx.fillText('Rincian Order:', 40, 164);
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.fillText(orderDesc, 160, 164);
+
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.12)';
+    ctx.beginPath();
+    ctx.roundRect(32, 184, cardWidth - 64, 42, 8);
+    ctx.fill();
+
+    ctx.fillStyle = '#f4f4f5';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.fillText('TOTAL TAGIHAN:', 44, 210);
+
+    ctx.fillStyle = '#f59e0b';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(totalAmount, cardWidth - 44, 211);
+
+    // BSI Transfer Account Box
+    const bankName = localStorage.getItem('huma_farm_bank_name') || 'BANK BSI';
+    const bankNumber = localStorage.getItem('huma_farm_bank_number') || '7367004597';
+    const bankOwner = localStorage.getItem('huma_farm_bank_owner') || 'Mela Mufida';
+
+    ctx.fillStyle = '#27272a';
+    ctx.beginPath();
+    ctx.roundRect(24, 252, cardWidth - 48, 66, 10);
+    ctx.fill();
+    ctx.strokeStyle = '#10b981';
+    ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#10b981';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.fillText(`🏦 TRANSFER ${bankName}`, 40, 272);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 17px monospace';
+    ctx.fillText(bankNumber, 40, 296);
+
+    ctx.fillStyle = '#a1a1aa';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(`A.n. ${bankOwner}`, cardWidth - 40, 296);
+
+    // QRIS Display Section
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#f4f4f5';
+    ctx.font = 'bold 15px sans-serif';
+    ctx.fillText(`📱 ${merchantName}`, cardWidth / 2, 344);
+
+    const qrBoxSize = 250;
+    const qrBoxX = (cardWidth - qrBoxSize) / 2;
+    const qrBoxY = 358;
+
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.roundRect(qrBoxX, qrBoxY, qrBoxSize, qrBoxSize, 14);
+    ctx.fill();
+    ctx.strokeStyle = '#e4e4e7';
+    ctx.stroke();
+
+    const finishDownload = (qrImageObj) => {
+        if (qrImageObj) {
+            ctx.drawImage(qrImageObj, qrBoxX + 10, qrBoxY + 10, qrBoxSize - 20, qrBoxSize - 20);
+        }
+
+        ctx.fillStyle = '#a1a1aa';
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Scan QRIS via Mobile Banking / E-Wallet (BCA, GoPay, OVO, DANA, dll)', cardWidth / 2, qrBoxY + qrBoxSize + 28);
+        ctx.fillText('& masukkan nominal transfer sesuai Total Tagihan di atas.', cardWidth / 2, qrBoxY + qrBoxSize + 46);
+
+        ctx.fillStyle = '#71717a';
+        ctx.font = 'italic 11px sans-serif';
+        ctx.fillText('Terima kasih telah berbelanja telur segar berkualitas di Huma Farm!', cardWidth / 2, cardHeight - 20);
+
+        canvas.toBlob((blob) => {
+            if (!blob) return;
+            const blobUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            const cleanId = orderId.replace('#', '');
+            const fileName = `HumaFarm_NotaPemesanan_${cleanId}.png`;
+            a.href = blobUrl;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(blobUrl);
+            showNotificationModal('Nota Pemesanan Diunduh!', `Gambar ${fileName} berhasil tersimpan.`, '✅', 'success');
+        }, 'image/png');
+    };
+
+    if (qrisImg && qrisImg.src) {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => finishDownload(img);
+        img.onerror = () => finishDownload(null);
+        img.src = qrisImg.src;
+    } else {
+        finishDownload(null);
+    }
+}
+
+function selectPaymentMethod(method) {
+    const bsiBox = document.getElementById('bsi-payment-box');
+    const qrisBox = document.getElementById('qris-payment-box');
+
+    if (bsiBox) bsiBox.style.display = 'block';
+    if (qrisBox) qrisBox.style.display = 'block';
+    
+    let grandTotal = pendingOrderData ? pendingOrderData.grandTotal : 0;
+    updateDynamicQrisInPaymentModal(grandTotal);
+}
+
+function closePaymentInstructionsModal(returnToForm = false) {
+    const modal = document.getElementById('modal-payment-instructions');
+    if (modal) modal.classList.remove('active');
+
+    if (returnToForm) {
+        openQuickUserOrderModal(true);
+    }
+}
+
+let _isOrderSubmitting = false;
+async function executeOrderWithCountDown() {
+    if (!pendingOrderData) return;
+    if (_isOrderSubmitting) {
+        console.warn('Order submission already in progress, ignoring duplicate call.');
+        return;
+    }
+    _isOrderSubmitting = true;
+
+    const { orderId, buyerName, buyerPhone, orderDescArr, grandTotal, itemsToProcess, isAdminCreated } = pendingOrderData;
+
+    const savedBankName = localStorage.getItem('huma_farm_bank_name') || 'BSI';
+    const savedBankNumber = localStorage.getItem('huma_farm_bank_number') || '7367004597';
+    const savedBankOwner = localStorage.getItem('huma_farm_bank_owner') || 'Mela Mufida';
+    const payMethodText = `🏦 ${savedBankName} (${savedBankNumber}) / 📱 QRIS`;
+
+    try {
+        if (!isAdminCreated && !pendingOrderData.isSavedToDb) {
+            let itemIndex = 1;
+            for (const item of itemsToProcess) {
+                const prices = getTokoPrices();
+                const pricePerUnit = (item.category === 'negeri') 
+                    ? (item.unit === 'pack' ? prices.negeriPack : prices.negeriEgg)
+                    : (item.unit === 'pack' ? prices.kampungPack : prices.kampungEgg);
+                
+                const subtotal = item.qty * pricePerUnit;
+                const subId = itemsToProcess.length > 1 ? `${orderId}-${itemIndex}` : `${orderId}-1`;
+
+                await apiRequest('/orders', 'POST', {
+                    id: subId,
+                    buyer_name: buyerName,
+                    buyer_phone: buyerPhone || '',
+                    category: item.category,
+                    egg_category: item.category,
+                    unit: item.unit,
+                    package_type: item.unit,
+                    qty: item.qty,
+                    quantity: item.qty,
+                    price_per_unit: pricePerUnit,
+                    total_price: subtotal,
+                    order_date: new Date().toISOString().split('T')[0],
+                    payment_method: payMethodText,
+                    payment_status: 'Menunggu Pembayaran'
+                });
+                itemIndex++;
+            }
+            pendingOrderData.isSavedToDb = true;
+            await fetchCloudData();
+        }
+
+        closePaymentInstructionsModal(false);
+        closeSystemNotificationModal();
+
+        const orderDescStr = orderDescArr.join('\n');
+        const em = {
+            egg: String.fromCodePoint(0x1F95A),
+            pin: String.fromCodePoint(0x1F424),
+            user: String.fromCodePoint(0x1F464),
+            phone: String.fromCodePoint(0x1F4F1),
+            box: String.fromCodePoint(0x1F4E6),
+            card: String.fromCodePoint(0x1F4B3)
+        };
+
+        const isAdminSending = currentRole === 'admin' && buyerPhone;
+        const greetingHeader = isAdminSending 
+            ? `Halo ${buyerName}! ${em.egg}\nBerikut pesanan kamu ya!`
+            : `Halo Huma Farm! ${em.egg}\nAku mau pesan telurnya ya!`;
+        const closingLine = isAdminSending
+            ? `Mohon konfirmasi pesanan kamu ya! Terima kasih!`
+            : `Mohon konfirmasi pesanan saya ya! Terima kasih!`;
+
+        const waMessage = `${greetingHeader}
+
+${em.pin} *Order ID*: #${orderId}
+${em.user} *Pemesan*: ${buyerName}
+${em.phone} *No. WA*: ${buyerPhone || '-'}
+
+${em.box} *Rincian Pesanan*:
+${orderDescStr}
+
+${em.card} *Total Tagihan*: Rp ${grandTotal.toLocaleString('id-ID')}
+${em.card} *Metode Pembayaran*: ${payMethodText}
+
+${closingLine}`;
         const encodedMessage = encodeURIComponent(waMessage);
-        const waUrl = `https://wa.me/6282299336676?text=${encodedMessage}`;
+        let targetWaPhone = getAdminPhoneNumber();
+        if (currentRole === 'admin' && buyerPhone) {
+            const formattedBuyer = formatPhoneNumberForWa(buyerPhone);
+            if (formattedBuyer) {
+                targetWaPhone = formattedBuyer;
+            }
+        }
+        const waUrl = `https://api.whatsapp.com/send/?phone=${targetWaPhone}&text=${encodedMessage}`;
+
+        window.pendingWaUrl = waUrl;
+        const btnForceWa = document.getElementById('btn-force-open-wa');
+        if (btnForceWa) btnForceWa.href = waUrl;
 
         // Open Countdown Modal
         const countdownModal = document.getElementById('modal-wa-redirect-countdown');
@@ -1276,12 +2139,13 @@ async function executeOrderWithCountDown() {
             }
         }, 1000);
 
-        // Save pending waUrl for forced click
-        window.pendingWaUrl = waUrl;
-
     } catch (err) {
+        _isOrderSubmitting = false;
+        closeSystemNotificationModal();
         console.error('API checkout error:', err);
-        showNotificationModal('Gagal Mengirim Pesanan', 'Gagal menghubungi server database. Silakan coba lagi.', '❌', 'error');
+        handleCrudError(err, 'Gagal Mengirim Pesanan', 'Gagal menghubungi server database. Silakan coba lagi.');
+    } finally {
+        _isOrderSubmitting = false;
     }
 }
 
@@ -1336,6 +2200,18 @@ function renderTokoData() {
 
     const prices = getTokoPrices();
 
+    // Render Dynamic Prices for Pack & Eceran (per Butir)
+    const priceNegeriPackEl = document.getElementById('toko-price-negeri-pack');
+    const priceNegeriEggEl = document.getElementById('toko-price-negeri-egg');
+    const priceKampungPackEl = document.getElementById('toko-price-kampung-pack');
+    const priceKampungEggEl = document.getElementById('toko-price-kampung-egg');
+
+    if (priceNegeriPackEl) priceNegeriPackEl.textContent = `Rp ${(prices.negeriPack || 25000).toLocaleString('id-ID')}`;
+    if (priceNegeriEggEl) priceNegeriEggEl.textContent = `Rp ${(prices.negeriEgg || 2500).toLocaleString('id-ID')}/btr`;
+
+    if (priceKampungPackEl) priceKampungPackEl.textContent = `Rp ${(prices.kampungPack || 35000).toLocaleString('id-ID')}`;
+    if (priceKampungEggEl) priceKampungEggEl.textContent = `Rp ${(prices.kampungEgg || 3500).toLocaleString('id-ID')}/btr`;
+
     const tokoStokNegeri = document.getElementById('toko-stok-negeri');
     const tokoStokKampung = document.getElementById('toko-stok-kampung');
     if (tokoStokNegeri) tokoStokNegeri.textContent = `${totalNegeri} Butir`;
@@ -1355,6 +2231,7 @@ function renderTokoData() {
     if (packNegeriEl) packNegeriEl.textContent = `${packNegeri} Pack`;
     if (eceranNegeriEl) eceranNegeriEl.textContent = `${eceranNegeri} Butir`;
     if (packKampungEl) packKampungEl.textContent = `${packKampung} Pack`;
+    if (eceranKampungEl) eceranKampungEl.textContent = `${eceranKampung} Butir`;
 }
 
 
@@ -1375,9 +2252,6 @@ function renderTokoOrdersData() {
     });
 
     // Filter by Role Permissions:
-    // USER: Only view orders placed by user's name
-    // VISITOR: View all, but buyer names are anonymized
-    // ADMIN: View all with full edit/delete & confirm actions
     if (currentRole === 'user' && currentUser) {
         orders = orders.filter(item => item.buyerName && item.buyerName.toLowerCase() === currentUser.name.toLowerCase());
     }
@@ -1388,12 +2262,15 @@ function renderTokoOrdersData() {
 
     let filteredOrders = orders.filter(item => {
         let matchType = true;
+        let matchMonth = true;
+        let matchYear = true;
+
         if (typeChecked.length > 0) {
             const isCompleted = item.status === 'completed';
             const isPO = item.status === 'po';
-            const isPending = item.status === 'pending_confirm';
+            const isPending = item.status === 'pending_confirm' || item.status === 'pending';
             const isLunas = item.paymentStatus === 'Lunas';
-            const isUnpaid = item.paymentStatus === 'Belum Bayar' || item.paymentStatus === 'Menunggu Konfirmasi';
+            const isUnpaid = item.paymentStatus === 'Belum Bayar' || item.paymentStatus === 'Menunggu Konfirmasi' || item.paymentStatus === 'Menunggu Pembayaran' || (item.paymentStatus && item.paymentStatus.toLowerCase().includes('menunggu'));
 
             matchType = (
                 (typeChecked.includes('completed') && isCompleted) ||
@@ -1403,9 +2280,6 @@ function renderTokoOrdersData() {
                 (typeChecked.includes('unpaid') && isUnpaid)
             );
         }
-
-        let matchMonth = true;
-        let matchYear = true;
 
         if (item.createdAt) {
             const [datePart] = item.createdAt.split('T');
@@ -1432,90 +2306,368 @@ function renderTokoOrdersData() {
         return;
     }
 
-    let html = '<div style="display: flex; flex-direction: column; gap: 8px;">';
+    // Group orders by base ID
+    const groups = {};
+    const groupOrder = [];
+
     filteredOrders.forEach(item => {
-        const isPO = item.status === 'po';
-        const isPendingConfirm = item.status === 'pending_confirm';
-        const categoryText = item.category === 'negeri' ? 'Telur Negeri' : 'Telur Kampung';
-        const unitText = item.unit === 'pack' ? 'Pack (isi 10)' : 'Butir';
-
-        // Anonymize buyer name for visitors
-        const displayName = currentRole === 'visitor' ? anonymizeBuyerName(item.buyerName) : (item.buyerName || 'Pembeli');
-
-        let poBadge = `<span class="badge-status-completed">🛍️ Langsung</span>`;
-        if (isPO) {
-            poBadge = `<span class="badge-status-pending">🏷️ PO #${item.poNumber || 1}</span>`;
-        } else if (isPendingConfirm) {
-            poBadge = `<span class="badge-status-pending">⏳ Menunggu Konfirmasi</span>`;
+        const baseId = getBaseOrderId(item.id);
+        if (!groups[baseId]) {
+            groups[baseId] = {
+                id: baseId,
+                buyerName: item.buyerName,
+                buyerPhone: item.buyerPhone,
+                createdAt: item.createdAt,
+                status: item.status,
+                paymentStatus: item.paymentStatus,
+                poNumber: item.poNumber,
+                shortageEggs: 0,
+                items: [],
+                totalPrice: 0
+            };
+            groupOrder.push(baseId);
         }
 
-        let paymentBadge = `<span class="badge-status-completed">🟢 Lunas</span>`;
-        if (item.paymentStatus === 'Belum Bayar') {
-            paymentBadge = `<span class="badge-status-unpaid">🔴 Belum Bayar</span>`;
-        } else if (item.paymentStatus === 'Menunggu Konfirmasi') {
-            paymentBadge = `<span class="badge-status-pending">🟡 Menunggu Konfirmasi Admin</span>`;
+        // Deduplicate duplicate entries caused by double-submit (e.g. ORD-16332 vs ORD-16332-1)
+        const isDuplicate = groups[baseId].items.some(existing => {
+            const sameSpec = existing.category === item.category && 
+                             existing.unit === item.unit && 
+                             existing.qty === item.qty && 
+                             Math.abs(existing.totalPrice - item.totalPrice) < 0.01;
+            if (!sameSpec) return false;
+
+            const id1 = String(existing.id);
+            const id2 = String(item.id);
+            const isBaseAndSub = (id1 === baseId && id2 === `${baseId}-1`) || (id2 === baseId && id1 === `${baseId}-1`);
+            const sameCreated = existing.createdAt && item.createdAt && existing.createdAt === item.createdAt;
+            return isBaseAndSub || sameCreated;
+        });
+
+        if (isDuplicate) return;
+
+        groups[baseId].items.push(item);
+        groups[baseId].totalPrice += parseFloat(item.totalPrice || 0);
+        groups[baseId].shortageEggs += parseInt(item.shortageEggs || 0);
+
+        if (item.status === 'po') {
+            groups[baseId].status = 'po';
+        }
+
+        const oldStatus = groups[baseId].paymentStatus;
+        const newStatus = item.paymentStatus;
+        if (newStatus === 'Batal' || oldStatus === 'Batal') {
+            groups[baseId].paymentStatus = 'Batal';
+        } else if (newStatus === 'Menunggu Konfirmasi' || oldStatus === 'Menunggu Konfirmasi') {
+            groups[baseId].paymentStatus = 'Menunggu Konfirmasi';
+        } else if (newStatus === 'Belum Bayar' || oldStatus === 'Belum Bayar') {
+            groups[baseId].paymentStatus = 'Belum Bayar';
+        } else {
+            groups[baseId].paymentStatus = 'Lunas';
+        }
+    });
+
+    let html = '<div style="display: flex; flex-direction: column; gap: 8px;">';
+    groupOrder.forEach(baseId => {
+        const group = groups[baseId];
+        const isPO = group.status === 'po';
+        const isPendingConfirm = group.status === 'pending_confirm';
+        const displayName = currentRole === 'visitor' ? anonymizeBuyerName(group.buyerName) : (group.buyerName || 'Pembeli');
+
+        // Single Status Badge next to buyer's name
+        let statusBadge = `<span class="badge-status-completed">🟢 Lunas</span>`;
+        if (isPendingConfirm || group.paymentStatus === 'Menunggu Konfirmasi') {
+            statusBadge = `<span class="badge-status-pending">⏳ Menunggu Konfirmasi</span>`;
+        } else if (group.paymentStatus === 'Belum Bayar') {
+            statusBadge = `<span class="badge-status-unpaid">🔴 Belum Bayar</span>`;
+        } else if (group.paymentStatus === 'Batal') {
+            statusBadge = `<span class="badge-status-unpaid">❌ Batal</span>`;
+        } else if (isPO) {
+            statusBadge = `<span class="badge-status-pending">🏷️ PO #${group.poNumber || 1}</span>`;
         }
 
         let shortageWarning = '';
-        if (isPO && item.shortageEggs > 0) {
-            shortageWarning = `<div style="font-size: 0.72rem; color: var(--ranch-rose); font-weight: 700; margin-top: 2px; display: flex; align-items: center; gap: 4px;">
-                ⚠️ <span>Stok Kurang ${item.shortageEggs} Butir lagi untuk memenuhi PO ini!</span>
+        if (isPO && group.shortageEggs > 0) {
+            shortageWarning = `<div style="font-size: 0.72rem; color: var(--ranch-rose); font-weight: 700; margin-top: 4px; display: flex; align-items: center; gap: 4px;">
+                ⚠️ <span>Stok Kurang ${group.shortageEggs} Butir lagi untuk memenuhi PO ini!</span>
             </div>`;
         }
 
-        const formattedDate = formatIndonesianDate(item.createdAt.split('T')[0]);
+        const formattedDate = formatIndonesianDate(group.createdAt.split('T')[0]);
 
-        // Action Buttons according to Role
         let actionButtons = '';
         if (currentRole === 'admin') {
             actionButtons = `
                 <div style="display: flex; gap: 5px; margin-top: 4px; justify-content: flex-end;">
-                    ${item.paymentStatus !== 'Lunas' ? `<button class="btn btn-ranch" style="font-size: 0.68rem; padding: 3px 9px; min-height: 26px;" onclick="confirmUserOrderPayment('${item.id}')">✓ Lunas</button>` : ''}
-                    <button class="btn btn-outline" style="font-size: 0.68rem; padding: 3px 8px; min-height: 26px; color: var(--ranch-amber); border-color: var(--ranch-amber);" onclick="editUserOrderRecord('${item.id}')">✏️ Edit</button>
-                    <button class="btn btn-rose" style="font-size: 0.68rem; padding: 3px 7px; min-height: 26px;" onclick="deleteUserOrderRecord('${item.id}')">🗑️ Hapus</button>
+                    ${group.paymentStatus !== 'Lunas' && group.paymentStatus !== 'Batal' ? `<button class="btn btn-ranch" style="font-size: 0.68rem; padding: 3px 9px; min-height: 26px;" onclick="confirmUserOrderPayment('${group.items[0].id}')">✓ Lunas</button>` : ''}
+                    <button class="btn btn-outline" style="font-size: 0.68rem; padding: 3px 8px; min-height: 26px; color: var(--ranch-amber); border-color: var(--ranch-amber);" onclick="editUserOrderRecord('${group.items[0].id}')">✏️ Edit</button>
+                    <button class="btn btn-rose" style="font-size: 0.68rem; padding: 3px 7px; min-height: 26px;" onclick="deleteUserOrderRecord('${group.items[0].id}')">🗑️ Hapus</button>
                 </div>
             `;
-        } else if (currentRole === 'user' && item.paymentStatus !== 'Lunas') {
+        } else if (currentRole === 'user' && group.paymentStatus !== 'Lunas' && group.paymentStatus !== 'Batal') {
             actionButtons = `
                 <div style="display: flex; gap: 4px; margin-top: 4px; justify-content: flex-end;">
-                    <button class="btn btn-outline" style="font-size: 0.68rem; padding: 2px 6px; min-height: 24px; color: var(--ranch-rose);" onclick="deleteUserOrderRecord('${item.id}')">❌ Batalkan</button>
+                    <button class="btn btn-outline" style="font-size: 0.68rem; padding: 2px 6px; min-height: 24px; color: var(--ranch-rose);" onclick="deleteUserOrderRecord('${group.items[0].id}')">❌ Batalkan</button>
                 </div>
             `;
         }
 
+        // Sort items so bonus items are ALWAYS at the end of the list
+        group.items.sort((a, b) => {
+            const aIsReward = (a.isReward || parseFloat(a.totalPrice) === 0 || (a.category && a.category.includes('bonus'))) ? 1 : 0;
+            const bIsReward = (b.isReward || parseFloat(b.totalPrice) === 0 || (b.category && b.category.includes('bonus'))) ? 1 : 0;
+            return aIsReward - bIsReward;
+        });
+
+        let itemsDetailsHTML = '';
+        group.items.forEach(subItem => {
+            const categoryText = subItem.category === 'negeri' ? 'Telur Negeri' : 'Telur Kampung';
+            const unitText = subItem.unit === 'pack' ? 'Pack (isi 10)' : 'Butir';
+            const isReward = subItem.isReward || parseFloat(subItem.totalPrice) === 0 || (subItem.category && subItem.category.includes('bonus'));
+            
+            const isNegeri = subItem.category === 'negeri';
+            const eggIcon = isNegeri 
+                ? `<svg width="12" height="15" viewBox="0 0 100 125" style="vertical-align: -2px; margin-right: 4px; display: inline-block;"><path d="M 50,5 C 22,5 5,45 5,75 C 5,102 25,120 50,120 C 75,120 95,102 95,75 C 95,45 78,5 50,5 Z" fill="#B06530"/><ellipse cx="38" cy="32" rx="14" ry="22" fill="#FFFFFF" opacity="0.25" transform="rotate(-18 38 32)"/></svg>`
+                : `<svg width="12" height="15" viewBox="0 0 100 125" style="vertical-align: -2px; margin-right: 4px; display: inline-block;"><path d="M 50,5 C 22,5 5,45 5,75 C 5,102 25,120 50,120 C 75,120 95,102 95,75 C 95,45 78,5 50,5 Z" fill="#FFFFFF" stroke="#94A3B8" stroke-width="5"/><ellipse cx="38" cy="32" rx="14" ry="22" fill="#FFFFFF" opacity="0.75" transform="rotate(-18 38 32)"/></svg>`;
+
+            if (isReward) {
+                itemsDetailsHTML += `
+                    <div style="display: flex; align-items: center; justify-content: space-between; border-top: 1px dashed var(--border-color); padding-top: 6px; margin-top: 6px;">
+                        <span style="font-size: 0.76rem; font-weight: 700; color: var(--ranch-amber);">🎁 [Bonus Pembelian] ${subItem.qty} ${unitText} ${categoryText}</span>
+                        <strong style="color: var(--text-muted); font-size: 0.8rem;">Rp 0</strong>
+                    </div>
+                `;
+            } else {
+                itemsDetailsHTML += `
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+                        <span style="font-size: 0.78rem; font-weight: 700; color: var(--text-main);">${eggIcon}${subItem.qty} ${unitText} ${categoryText}</span>
+                        <strong style="color: var(--ranch-amber); font-size: 0.82rem;">Rp ${parseFloat(subItem.totalPrice).toLocaleString('id-ID')}</strong>
+                    </div>
+                `;
+            }
+        });
+
         html += `
             <div style="background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 10px; padding: 10px 12px;">
-                
                 <!-- ROW 1: ID + Timestamp -->
                 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px;">
-                    <span style="font-size: 0.65rem; background: var(--bg-card); border: 1px solid var(--border-color); padding: 2px 7px; border-radius: 5px; font-weight: 800; color: var(--ranch-amber);">${item.id || '#ORD-000'}</span>
+                    <span style="font-size: 0.65rem; background: var(--bg-card); border: 1px solid var(--border-color); padding: 2px 7px; border-radius: 5px; font-weight: 800; color: var(--ranch-amber);">${group.id.startsWith('#') ? group.id : '#' + group.id}</span>
                     <span style="font-size: 0.67rem; color: var(--text-muted);">📅 ${formattedDate}</span>
                 </div>
-
-                <!-- ROW 2: Buyer Name -->
-                <div style="margin-bottom: 6px; display: flex; align-items: center; gap: 5px;">
+ 
+                <!-- ROW 2: Buyer Name + Status Badge -->
+                <div style="margin-bottom: 6px; display: flex; align-items: center; gap: 6px;">
                     <span style="font-size: 0.78rem;">👤</span>
                     <strong style="font-size: 0.82rem; color: var(--text-main);">${displayName}</strong>
-                    ${poBadge}
+                    ${statusBadge}
                 </div>
-
+ 
                 <!-- ROW 3: Detail Box -->
                 <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 7px; padding: 7px 10px; margin-bottom: 6px;">
-                    <div style="display: flex; align-items: center; justify-content: space-between;">
-                        <span style="font-size: 0.78rem; font-weight: 700; color: var(--text-main);">🥚 ${item.qty} ${unitText} ${categoryText}</span>
-                        <strong style="color: var(--ranch-amber); font-size: 0.88rem;">Rp ${item.totalPrice.toLocaleString('id-ID')}</strong>
-                    </div>
+                    ${itemsDetailsHTML}
                     ${shortageWarning}
                 </div>
-
-                <!-- ROW 4: Status -->
-                <div style="display: flex; align-items: center; gap: 6px; font-size: 0.74rem; margin-bottom: 6px;">
-                    <span style="color: var(--text-muted);">Status:</span>
-                    ${paymentBadge}
+ 
+                <!-- ROW 4: Total Price -->
+                <div style="display: flex; align-items: center; justify-content: flex-end; margin-bottom: 4px;">
+                    <strong style="color: var(--ranch-amber); font-size: 0.9rem;">Total: Rp ${group.totalPrice.toLocaleString('id-ID')}</strong>
                 </div>
 
-                <!-- ROW 5: Action Buttons -->
                 ${actionButtons}
+            </div>
+        `;
+    });
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+function renderPanenData() {
+    const container = document.getElementById('panen-history-container');
+    if (!container) return;
+
+    // 1. Calculate and update ready stock display
+    const stock = getCalculatedReadyStock();
+    
+    const totalNegeriEl = document.getElementById('stok-total-negeri');
+    const packNegeriEl = document.getElementById('pack-negeri-val');
+    const eceranNegeriEl = document.getElementById('eceran-negeri-val');
+    
+    const totalKampungEl = document.getElementById('stok-total-kampung');
+    const packKampungEl = document.getElementById('pack-kampung-val');
+    const eceranKampungEl = document.getElementById('eceran-kampung-val');
+
+    if (totalNegeriEl) totalNegeriEl.textContent = `${stock.negeri} Butir`;
+    if (packNegeriEl) packNegeriEl.textContent = `${Math.floor(stock.negeri / 10)} Pack`;
+    if (eceranNegeriEl) eceranNegeriEl.textContent = `${stock.negeri % 10} Butir`;
+
+    if (totalKampungEl) totalKampungEl.textContent = `${stock.kampung} Butir`;
+    if (packKampungEl) packKampungEl.textContent = `${Math.floor(stock.kampung / 10)} Pack`;
+    if (eceranKampungEl) eceranKampungEl.textContent = `${stock.kampung % 10} Butir`;
+
+    // 2. Load and filter history records (combined manual panen + sales orders lunas)
+    const panenHistory = JSON.parse(localStorage.getItem('huma_farm_panen_history') || '[]');
+    const orders = JSON.parse(localStorage.getItem('huma_farm_orders') || '[]');
+
+    const combinedList = [];
+
+    // Add manual harvests
+    panenHistory.forEach(item => {
+        combinedList.push({
+            source: 'panen',
+            id: item.id,
+            date: item.date, // YYYY-MM-DD
+            type: item.type, // 'add' or 'sub'
+            negeri: item.negeri || 0,
+            kampung: item.kampung || 0,
+            reason: item.reason
+        });
+    });
+
+    // Add lunas sales orders (separated into regular sales and reward outflows)
+    orders.forEach(item => {
+        if (item.paymentStatus === 'Lunas') {
+            const isReward = parseFloat(item.totalPrice) === 0 && item.qty > 0;
+            combinedList.push({
+                source: 'order',
+                id: item.id,
+                date: item.createdAt ? item.createdAt.split('T')[0] : '', // YYYY-MM-DD
+                type: isReward ? 'reward_outflow' : 'sale',
+                negeri: item.category === 'negeri' ? (item.totalEggs || 0) : 0,
+                kampung: item.category === 'kampung' ? (item.totalEggs || 0) : 0,
+                buyerName: item.buyerName,
+                isReward: isReward
+            });
+        }
+    });
+
+    // Sort by date (newest first)
+    combinedList.sort((a, b) => {
+        const dateA = a.date || '';
+        const dateB = b.date || '';
+        if (dateA !== dateB) {
+            return dateB.localeCompare(dateA);
+        }
+        return (b.id || '').localeCompare(a.id || '');
+    });
+
+    // Get filters
+    const monthFilter = document.getElementById('filter-panen-month')?.value || 'all';
+    const yearFilter = document.getElementById('filter-panen-year')?.value || 'all';
+
+    let filteredHistory = combinedList.filter(item => {
+        if (!item.date) return true;
+        const [year, month] = item.date.split('-');
+        
+        const matchMonth = monthFilter === 'all' || month === monthFilter;
+        const matchYear = yearFilter === 'all' || year === yearFilter;
+
+        return matchMonth && matchYear;
+    });
+
+    if (filteredHistory.length === 0) {
+        container.innerHTML = `
+            <div class="card-placeholder">
+                <span class="placeholder-icon">📋</span>
+                <p>Belum ada catatan transaksi untuk filter ini.</p>
+            </div>
+        `;
+        return;
+    }
+
+    let html = '<div style="display: flex; flex-direction: column; gap: 8px;">';
+    filteredHistory.forEach(item => {
+        const formattedDate = formatIndonesianDate(item.date);
+        
+        let typeBadge = '';
+        let actionColumn = '';
+        let quantityBadges = '';
+        let noteText = '';
+
+        if (item.source === 'panen') {
+            if (item.type === 'sub') {
+                typeBadge = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 6px; background: rgba(244, 63, 94, 0.15); color: #f43f5e; font-size: 0.7rem; font-weight: 700;">➖ Pengurangan</span>`;
+                
+                if (item.negeri > 0) {
+                    quantityBadges += `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; background: rgba(245, 158, 11, 0.1); border: 1px solid var(--ranch-amber); color: var(--ranch-amber); font-size: 0.74rem; font-weight: 700; margin-right: 6px;">🟤 Negeri: -${item.negeri} Butir</span>`;
+                }
+                if (item.kampung > 0) {
+                    quantityBadges += `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; background: rgba(34, 197, 94, 0.1); border: 1px solid var(--ranch-green); color: var(--ranch-green); font-size: 0.74rem; font-weight: 700;">⚪ Kampung: -${item.kampung} Butir</span>`;
+                }
+                noteText = item.reason || 'Pengurangan konsumsi/sedekah';
+            } else {
+                typeBadge = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 6px; background: rgba(16, 185, 129, 0.15); color: #10b981; font-size: 0.7rem; font-weight: 700;">➕ Panen Harian</span>`;
+                
+                if (item.negeri > 0) {
+                    quantityBadges += `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; background: rgba(245, 158, 11, 0.1); border: 1px solid var(--ranch-amber); color: var(--ranch-amber); font-size: 0.74rem; font-weight: 700; margin-right: 6px;">🟤 Negeri: +${item.negeri} Butir</span>`;
+                }
+                if (item.kampung > 0) {
+                    quantityBadges += `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; background: rgba(34, 197, 94, 0.1); border: 1px solid var(--ranch-green); color: var(--ranch-green); font-size: 0.74rem; font-weight: 700;">⚪ Kampung: +${item.kampung} Butir</span>`;
+                }
+                noteText = 'Panen dari kandang';
+            }
+
+            actionColumn = `
+                <div style="display: flex; gap: 4px; align-items: center;">
+                    <button class="btn btn-outline" style="font-size: 0.65rem; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 6px; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; padding: 0;" onclick="editPanenRecord('${item.id}')" title="Edit Catatan">✏️</button>
+                    <button class="btn btn-rose" style="font-size: 0.65rem; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 6px; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; padding: 0;" onclick="deletePanenRecord('${item.id}')" title="Hapus Catatan">🗑️</button>
+                </div>
+            `;
+        } else if (item.source === 'order') {
+            if (item.isReward) {
+                typeBadge = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 6px; background: rgba(244, 63, 94, 0.15); color: #f43f5e; font-size: 0.7rem; font-weight: 700;">➖ Pengurangan</span>`;
+                
+                if (item.negeri > 0) {
+                    quantityBadges += `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; background: rgba(245, 158, 11, 0.1); border: 1px solid var(--ranch-amber); color: var(--ranch-amber); font-size: 0.74rem; font-weight: 700; margin-right: 6px;">🟤 Negeri: -${item.negeri} Butir</span>`;
+                }
+                if (item.kampung > 0) {
+                    quantityBadges += `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; background: rgba(34, 197, 94, 0.1); border: 1px solid var(--ranch-green); color: var(--ranch-green); font-size: 0.74rem; font-weight: 700;">⚪ Kampung: -${item.kampung} Butir</span>`;
+                }
+                
+                noteText = `Reward pembelian ${item.buyerName || 'User'} - ${getBaseOrderId(item.id).startsWith('#') ? getBaseOrderId(item.id) : '#' + getBaseOrderId(item.id)}`;
+                
+                actionColumn = `
+                    <span style="border: 1.5px solid var(--text-muted); color: var(--text-muted); background: rgba(255, 255, 255, 0.05); padding: 3px 8px; border-radius: 6px; font-size: 0.68rem; font-weight: 800; display: inline-flex; align-items: center; gap: 3px;">🎁 Reward</span>
+                `;
+            } else {
+                typeBadge = `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 6px; background: rgba(59, 130, 246, 0.15); color: #3b82f6; font-size: 0.7rem; font-weight: 700;">🛍️ Penjualan</span>`;
+                
+                if (item.negeri > 0) {
+                    quantityBadges += `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; background: rgba(245, 158, 11, 0.1); border: 1px solid var(--ranch-amber); color: var(--ranch-amber); font-size: 0.74rem; font-weight: 700; margin-right: 6px;">🟤 Negeri: -${item.negeri} Butir</span>`;
+                }
+                if (item.kampung > 0) {
+                    quantityBadges += `<span style="display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; background: rgba(34, 197, 94, 0.1); border: 1px solid var(--ranch-green); color: var(--ranch-green); font-size: 0.74rem; font-weight: 700;">⚪ Kampung: -${item.kampung} Butir</span>`;
+                }
+
+                actionColumn = `
+                    <span style="border: 1.5px solid #10b981; color: #10b981; background: rgba(16, 185, 129, 0.05); padding: 3px 8px; border-radius: 6px; font-size: 0.68rem; font-weight: 800; display: inline-flex; align-items: center; gap: 3px;">🛒 Lunas</span>
+                `;
+                noteText = `Pembelian oleh ${item.buyerName || 'User'} - ${getBaseOrderId(item.id).startsWith('#') ? getBaseOrderId(item.id) : '#' + getBaseOrderId(item.id)}`;
+            }
+        }
+
+        html += `
+            <div style="background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 12px; padding: 12px; margin-bottom: 8px; box-shadow: var(--shadow-sm);">
+                
+                <!-- ROW 1: Date + Type Badge & Action/Status Column with Separator -->
+                <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px dashed var(--border-color); padding-bottom: 8px; margin-bottom: 10px;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 0.82rem; color: var(--text-main); font-weight: 700;">📅 ${formattedDate}</span>
+                        ${typeBadge}
+                    </div>
+                    ${actionColumn}
+                </div>
+
+                <!-- ROW 2: Quantities Badges -->
+                <div style="margin-bottom: 8px; display: flex; flex-wrap: wrap; gap: 6px;">
+                    ${quantityBadges}
+                </div>
+
+                <!-- ROW 3: Note / Description -->
+                <div style="display: flex; align-items: center; gap: 6px; font-size: 0.78rem; color: var(--text-muted);">
+                    <span>📝</span>
+                    <strong>Note:</strong>
+                    <span>${noteText}</span>
+                </div>
+
             </div>
         `;
     });
@@ -1525,24 +2677,30 @@ function renderTokoOrdersData() {
 
 // CONFIRMATION & DELETION ACTIONS FOR ORDERS
 async function confirmUserOrderPayment(orderId) {
+    const baseId = getBaseOrderId(orderId);
     let orders = JSON.parse(localStorage.getItem('huma_farm_orders') || '[]');
-    const idx = orders.findIndex(o => o.id === orderId);
-    if (idx >= 0) {
+    const itemsToConfirm = orders.filter(o => getBaseOrderId(o.id) === baseId && o.paymentStatus !== 'Lunas');
+    
+    if (itemsToConfirm.length > 0) {
         showNotificationModal('Sedang Mengonfirmasi...', 'Mengonfirmasi status pembayaran...', '☁️', 'info');
         try {
-            await apiRequest(`/orders/${orderId}`, 'PUT', {
-                payment_status: 'Lunas'
-            });
+            for (const item of itemsToConfirm) {
+                await apiRequest(`/orders/${encodeURIComponent(item.id)}`, 'PUT', {
+                    payment_status: 'Lunas'
+                });
+            }
             await fetchCloudData();
+            closeSystemNotificationModal();
             showNotificationModal(
                 'Pesanan Dikonfirmasi Lunas!',
-                `Pesanan atas nama <strong>${orders[idx].buyerName}</strong> sebesar <strong>Rp ${orders[idx].totalPrice.toLocaleString('id-ID')}</strong> telah dikonfirmasi Lunas & kas bertambah.`,
+                `Seluruh pesanan dalam grup ini telah dikonfirmasi Lunas & kas bertambah.`,
                 '🟢',
                 'success'
             );
         } catch (err) {
+            closeSystemNotificationModal();
             console.error('API confirm order error:', err);
-            showNotificationModal('Gagal Sinkronisasi', 'Gagal memperbarui status ke server. Silakan coba lagi.', '❌', 'error');
+            handleCrudError(err, 'Gagal Sinkronisasi', 'Gagal memperbarui status ke server. Silakan coba lagi.');
         }
     }
 }
@@ -1567,12 +2725,212 @@ function closeDeleteOrderConfirmModal() {
     deletingOrderId = null;
 }
 
+function changeEditQty(key, delta) {
+    const fieldMap = {
+        'negeri_pack': 'edit-qty-negeri-pack',
+        'negeri_egg': 'edit-qty-negeri-egg',
+        'kampung_pack': 'edit-qty-kampung-pack',
+        'kampung_egg': 'edit-qty-kampung-egg',
+        'reward_egg': 'edit-qty-reward-egg'
+    };
+    const inputId = fieldMap[key];
+    if (!inputId) return;
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    let val = parseInt(input.value || '0') + delta;
+    if (val < 0) val = 0;
+    input.value = val;
+}
+
+function editUserOrderRecord(orderId) {
+    if (currentRole !== 'admin') return;
+
+    const orders = JSON.parse(localStorage.getItem('huma_farm_orders') || '[]');
+    const baseId = getBaseOrderId(orderId);
+    
+    // Find all item records matching this base order ID
+    const matchingOrders = orders.filter(o => getBaseOrderId(o.id) === baseId);
+    if (matchingOrders.length === 0) {
+        showNotificationModal('Pesanan Tidak Ditemukan', 'Data pesanan ini tidak dapat ditemukan.', '⚠️', 'error');
+        return;
+    }
+
+    const firstItem = matchingOrders[0];
+    const modal = document.getElementById('modal-edit-order');
+    if (!modal) return;
+
+    document.getElementById('edit-order-id').value = baseId;
+    document.getElementById('edit-order-id-label').textContent = baseId.startsWith('#') ? baseId : '#' + baseId;
+    document.getElementById('edit-order-buyer-name').value = firstItem.buyerName || '';
+    document.getElementById('edit-order-buyer-phone').value = firstItem.buyerPhone || '';
+    document.getElementById('edit-order-payment-status').value = firstItem.paymentStatus || 'Menunggu Konfirmasi';
+    
+    const dateStr = firstItem.createdAt ? firstItem.createdAt.split('T')[0] : new Date().toISOString().split('T')[0];
+    document.getElementById('edit-order-date').value = dateStr;
+
+    // Reset all edit item quantities
+    document.getElementById('edit-qty-negeri-pack').value = 0;
+    document.getElementById('edit-qty-negeri-egg').value = 0;
+    document.getElementById('edit-qty-kampung-pack').value = 0;
+    document.getElementById('edit-qty-kampung-egg').value = 0;
+    document.getElementById('edit-qty-reward-egg').value = 0;
+
+    // Populate quantities from existing matching items
+    matchingOrders.forEach(o => {
+        const isReward = o.isReward || parseFloat(o.totalPrice || 0) === 0;
+        if (isReward) {
+            document.getElementById('edit-qty-reward-egg').value = o.qty || 0;
+        } else if (o.category === 'negeri' && o.unit === 'pack') {
+            document.getElementById('edit-qty-negeri-pack').value = o.qty || 0;
+        } else if (o.category === 'negeri' && o.unit === 'egg') {
+            document.getElementById('edit-qty-negeri-egg').value = o.qty || 0;
+        } else if (o.category === 'kampung' && o.unit === 'pack') {
+            document.getElementById('edit-qty-kampung-pack').value = o.qty || 0;
+        } else if (o.category === 'kampung' && o.unit === 'egg') {
+            document.getElementById('edit-qty-kampung-egg').value = o.qty || 0;
+        }
+    });
+
+    modal.classList.add('active');
+}
+
+function closeEditOrderModal() {
+    const modal = document.getElementById('modal-edit-order');
+    if (modal) modal.classList.remove('active');
+}
+
+async function handleSaveEditOrderSubmit(e) {
+    e.preventDefault();
+    const baseId = document.getElementById('edit-order-id').value;
+    const buyerName = document.getElementById('edit-order-buyer-name').value.trim();
+    const buyerPhone = document.getElementById('edit-order-buyer-phone').value.trim();
+    const paymentStatus = document.getElementById('edit-order-payment-status').value;
+    const orderDate = document.getElementById('edit-order-date').value;
+
+    if (!buyerName) {
+        showNotificationModal('Nama Kosong', 'Silakan masukkan nama pemesan.', '⚠️', 'error');
+        return;
+    }
+
+    const nPack = parseInt(document.getElementById('edit-qty-negeri-pack').value || '0');
+    const nEgg  = parseInt(document.getElementById('edit-qty-negeri-egg').value || '0');
+    const kPack = parseInt(document.getElementById('edit-qty-kampung-pack').value || '0');
+    const kEgg  = parseInt(document.getElementById('edit-qty-kampung-egg').value || '0');
+    const rEgg  = parseInt(document.getElementById('edit-qty-reward-egg').value || '0');
+
+    if (nPack === 0 && nEgg === 0 && kPack === 0 && kEgg === 0 && rEgg === 0) {
+        showNotificationModal('Jumlah Kosong', 'Silakan masukkan minimal 1 item pesanan atau bonus.', '⚠️', 'error');
+        return;
+    }
+
+    const prices = getTokoPrices();
+    const orders = JSON.parse(localStorage.getItem('huma_farm_orders') || '[]');
+    const matchingOrders = orders.filter(o => getBaseOrderId(o.id) === baseId);
+
+    showNotificationModal('Sedang Menyimpan...', 'Memperbarui data pesanan di server...', '☁️', 'info');
+    try {
+        // 1. Delete old subitems in DB
+        for (const item of matchingOrders) {
+            try {
+                await apiRequest(`/orders/${encodeURIComponent(item.id)}`, 'DELETE');
+            } catch (err) {
+                console.warn('Delete old item failed:', item.id, err);
+            }
+        }
+
+        // 2. Build array of new items to create with unique suffixes
+        const newItemsToCreate = [];
+        const ts = Date.now();
+
+        if (nPack > 0) {
+            newItemsToCreate.push({
+                id: `${baseId}-N-PACK-${ts}`,
+                category: 'negeri',
+                unit: 'pack',
+                qty: nPack,
+                total_price: nPack * (prices.negeriPack || 27000)
+            });
+        }
+        if (nEgg > 0) {
+            newItemsToCreate.push({
+                id: `${baseId}-N-EGG-${ts}`,
+                category: 'negeri',
+                unit: 'egg',
+                qty: nEgg,
+                total_price: nEgg * (prices.negeriEgg || 2900)
+            });
+        }
+        if (kPack > 0) {
+            newItemsToCreate.push({
+                id: `${baseId}-K-PACK-${ts}`,
+                category: 'kampung',
+                unit: 'pack',
+                qty: kPack,
+                total_price: kPack * (prices.kampungPack || 33000)
+            });
+        }
+        if (kEgg > 0) {
+            newItemsToCreate.push({
+                id: `${baseId}-K-EGG-${ts}`,
+                category: 'kampung',
+                unit: 'egg',
+                qty: kEgg,
+                total_price: kEgg * (prices.kampungEgg || 3500)
+            });
+        }
+        if (rEgg > 0) {
+            newItemsToCreate.push({
+                id: `${baseId}-R-${ts}`,
+                category: 'kampung',
+                unit: 'egg',
+                qty: rEgg,
+                total_price: 0
+            });
+        }
+
+        const formattedCreatedAt = orderDate ? orderDate + 'T12:00:00.000Z' : undefined;
+
+        // 3. Create updated subitems in DB
+        for (const payload of newItemsToCreate) {
+            await apiRequest('/orders', 'POST', {
+                id: payload.id,
+                buyer_name: buyerName,
+                buyer_phone: buyerPhone,
+                category: payload.category,
+                unit: payload.unit,
+                qty: payload.qty,
+                total_price: payload.total_price,
+                payment_status: paymentStatus,
+                created_at: formattedCreatedAt
+            });
+        }
+
+        await fetchCloudData();
+        closeEditOrderModal();
+        showNotificationModal(
+            'Pesanan Diperbarui!',
+            `Pesanan <strong>${baseId.startsWith('#') ? baseId : '#' + baseId}</strong> a.n. ${buyerName} berhasil diperbarui.`,
+            '✏️',
+            'success'
+        );
+    } catch (err) {
+        console.error('API edit order error:', err);
+        handleCrudError(err, 'Gagal Menyimpan', 'Gagal memperbarui data pesanan di server.');
+    }
+}
+
 async function executeDeleteOrderRecord() {
     if (!deletingOrderId) return;
 
-    showNotificationModal('Sedang Menghapus...', 'Menghapus data pesanan di server...', '☁️', 'info');
+    showNotificationModal('Sedang Menghapus...', 'Menyimpan perubahan di server...', '☁️', 'info');
     try {
-        await apiRequest(`/orders/${deletingOrderId}`, 'DELETE');
+        const orders = JSON.parse(localStorage.getItem('huma_farm_orders') || '[]');
+        const itemsToDelete = orders.filter(o => getBaseOrderId(o.id) === getBaseOrderId(deletingOrderId));
+        
+        for (const item of itemsToDelete) {
+            await apiRequest(`/orders/${encodeURIComponent(item.id)}`, 'DELETE');
+        }
+        
         await fetchCloudData();
         closeDeleteOrderConfirmModal();
         showNotificationModal(
@@ -1582,8 +2940,9 @@ async function executeDeleteOrderRecord() {
             'info'
         );
     } catch (err) {
+        closeSystemNotificationModal();
         console.error('API delete order error:', err);
-        showNotificationModal('Gagal Menghapus', 'Gagal menghapus data dari server.', '❌', 'error');
+        handleCrudError(err, 'Gagal Menghapus', 'Gagal menghapus data dari server.');
     }
 }
 
@@ -1594,34 +2953,84 @@ async function togglePaymentStatus(orderId) {
         const newPaymentStatus = orders[idx].paymentStatus === 'Lunas' ? 'Belum Bayar' : 'Lunas';
         showNotificationModal('Sedang Memperbarui...', 'Memperbarui status pembayaran di server...', '☁️', 'info');
         try {
-            await apiRequest(`/orders/${orderId}`, 'PUT', {
+            await apiRequest(`/orders/${encodeURIComponent(orderId)}`, 'PUT', {
                 payment_status: newPaymentStatus
             });
             await fetchCloudData();
             showNotificationModal('Status Pembayaran Diperbarui!', 'Status pembayaran berhasil diperbarui.', '💰', 'success');
         } catch (err) {
             console.error('API toggle payment status error:', err);
-            showNotificationModal('Gagal Sinkronisasi', 'Gagal memperbarui status ke server.', '❌', 'error');
+            handleCrudError(err, 'Gagal Sinkronisasi', 'Gagal memperbarui status ke server.');
         }
     }
 }
 
 // ----------------------------------------------------
+const AVATAR_BG_PALETTE = [
+    { id: 'gold', name: 'Gold Amber', bg: 'linear-gradient(135deg, #f59e0b, #d97706)' },
+    { id: 'blue', name: 'Royal Blue', bg: 'linear-gradient(135deg, #3b82f6, #1d4ed8)' },
+    { id: 'green', name: 'Emerald Green', bg: 'linear-gradient(135deg, #10b981, #047857)' },
+    { id: 'purple', name: 'Purple Orchid', bg: 'linear-gradient(135deg, #8b5cf6, #6d28d9)' },
+    { id: 'rose', name: 'Rose Sunset', bg: 'linear-gradient(135deg, #f43f5e, #be123c)' },
+    { id: 'dark', name: 'Obsidian Dark', bg: 'linear-gradient(135deg, #334155, #0f172a)' }
+];
+let selectedAvatarBg = 'linear-gradient(135deg, #f59e0b, #d97706)';
+
 function loadSettingsPageData() {
     const setPhoneInput = document.getElementById('set-new-phone');
     const previewBox = document.getElementById('settings-avatar-preview');
+    
+    const profileAvatar = document.getElementById('settings-profile-avatar');
+    const profileName = document.getElementById('settings-profile-name');
+    const profileRole = document.getElementById('settings-profile-role');
+    const profilePhone = document.getElementById('settings-profile-phone');
 
     if (currentRole === 'admin') {
         selectedProfileEmoji = localStorage.getItem('huma_farm_admin_avatar') || '👑';
-        if (previewBox) previewBox.textContent = selectedProfileEmoji;
-        if (setPhoneInput) setPhoneInput.value = '081234567890';
+        selectedAvatarBg = localStorage.getItem('huma_farm_admin_avatar_bg') || 'linear-gradient(135deg, #f59e0b, #d97706)';
+        
+        const adminPhone = localStorage.getItem('huma_farm_admin_phone') || (typeof cloudSettings !== 'undefined' && cloudSettings.admin_phone) || '081234567890';
+
+        if (previewBox) {
+            previewBox.textContent = selectedProfileEmoji;
+            previewBox.style.background = selectedAvatarBg;
+        }
+        if (setPhoneInput) setPhoneInput.value = adminPhone;
+        
+        if (profileAvatar) {
+            profileAvatar.textContent = selectedProfileEmoji;
+            profileAvatar.style.background = selectedAvatarBg;
+        }
+        if (profileName) profileName.textContent = 'Bos Admin';
+        if (profileRole) {
+            profileRole.textContent = '👑 Admin';
+            profileRole.style.color = 'var(--ranch-amber)';
+        }
+        if (profilePhone) profilePhone.textContent = '📱 WhatsApp: ' + adminPhone;
     } else if (currentUser) {
         selectedProfileEmoji = currentUser.avatar || '👤';
-        if (previewBox) previewBox.textContent = selectedProfileEmoji;
+        selectedAvatarBg = currentUser.avatarBg || 'linear-gradient(135deg, #f59e0b, #d97706)';
+
+        if (previewBox) {
+            previewBox.textContent = selectedProfileEmoji;
+            previewBox.style.background = selectedAvatarBg;
+        }
         if (setPhoneInput) setPhoneInput.value = currentUser.phone || '';
+        
+        if (profileAvatar) {
+            profileAvatar.textContent = selectedProfileEmoji;
+            profileAvatar.style.background = selectedAvatarBg;
+        }
+        if (profileName) profileName.textContent = currentUser.name;
+        if (profileRole) {
+            profileRole.textContent = '👤 Pelanggan';
+            profileRole.style.color = 'var(--ranch-green)';
+        }
+        if (profilePhone) profilePhone.textContent = '📱 WhatsApp: ' + (currentUser.phone || '-');
     }
 
     renderFarmEmojiPickerGrid(selectedProfileEmoji);
+    renderAvatarBgColorPickerGrid(selectedAvatarBg);
 }
 
 function renderFarmEmojiPickerGrid(activeEmoji) {
@@ -1655,15 +3064,50 @@ function selectFarmEmoji(emoji) {
     });
 }
 
+function renderAvatarBgColorPickerGrid(activeBg) {
+    const gridContainer = document.getElementById('farm-avatar-bg-color-grid');
+    if (!gridContainer) return;
+
+    gridContainer.innerHTML = '';
+    AVATAR_BG_PALETTE.forEach(c => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.style.width = '32px';
+        btn.style.height = '32px';
+        btn.style.borderRadius = '50%';
+        btn.style.background = c.bg;
+        btn.style.border = c.bg === activeBg ? '3px solid #ffffff' : '1px solid rgba(255,255,255,0.2)';
+        btn.style.cursor = 'pointer';
+        btn.style.boxShadow = c.bg === activeBg ? '0 0 8px rgba(245,158,11,0.8)' : 'none';
+        btn.title = c.name;
+        btn.onclick = () => selectAvatarBgColor(c.bg);
+        gridContainer.appendChild(btn);
+    });
+}
+
+function selectAvatarBgColor(bg) {
+    selectedAvatarBg = bg;
+    const previewBox = document.getElementById('settings-avatar-preview');
+    if (previewBox) previewBox.style.background = bg;
+    renderAvatarBgColorPickerGrid(bg);
+}
+
 async function handleUpdateAvatarSubmit(e) {
     e.preventDefault();
 
     if (currentRole === 'admin') {
         localStorage.setItem('huma_farm_admin_avatar', selectedProfileEmoji);
+        localStorage.setItem('huma_farm_admin_avatar_bg', selectedAvatarBg);
+        
+        const topbarAvatar = document.getElementById('topbar-avatar-img');
+        if (topbarAvatar) topbarAvatar.style.background = selectedAvatarBg;
+
         updateRoleVisibility();
+        loadSettingsPageData();
+        closeSettingsModal('modal-settings-avatar');
         showNotificationModal(
-            'Logo Profil Diperbarui!',
-            `Logo profil Bos Admin berhasil diperbarui ke <strong>${selectedProfileEmoji}</strong>.`,
+            'Logo & Warna Profil Diperbarui!',
+            `Logo profil Bos Admin berhasil diperbarui ke <strong>${selectedProfileEmoji}</strong> dengan warna background pilihan.`,
             '🎨',
             'success'
         );
@@ -1672,16 +3116,20 @@ async function handleUpdateAvatarSubmit(e) {
         try {
             const res = await apiRequest('/settings/profile', 'POST', {
                 id: currentUser.id,
-                avatar: selectedProfileEmoji
+                avatar: selectedProfileEmoji,
+                avatar_bg: selectedAvatarBg
             });
             if (res.success) {
                 currentUser.avatar = selectedProfileEmoji;
+                currentUser.avatarBg = selectedAvatarBg;
                 localStorage.setItem('huma_farm_current_user', JSON.stringify(currentUser));
                 await fetchCloudData();
                 
                 updateRoleVisibility();
+                loadSettingsPageData();
+                closeSettingsModal('modal-settings-avatar');
                 showNotificationModal(
-                    'Logo Profil Diperbarui!',
+                    'Logo & Warna Profil Diperbarui!',
                     `Logo profil akun Anda berhasil diperbarui ke <strong>${selectedProfileEmoji}</strong>.`,
                     '🎨',
                     'success'
@@ -1689,12 +3137,108 @@ async function handleUpdateAvatarSubmit(e) {
             }
         } catch (err) {
             console.error('API update avatar error:', err);
-            showNotificationModal('Gagal Memperbarui', 'Gagal menyimpan perubahan avatar profil ke server.', '❌', 'error');
+            handleCrudError(err, 'Gagal Memperbarui', 'Gagal menyimpan perubahan avatar profil ke server.');
         }
     }
 }
 
-// UPLOAD FILE GAMBAR QRIS KE SUPABASE STORAGE
+let activeQrisInputMode = 'upload';
+
+function updatePaymentSettingsSummaryCards() {
+    const bankName = localStorage.getItem('huma_farm_bank_name') || 'BSI';
+    const bankNumber = localStorage.getItem('huma_farm_bank_number') || '7367004597';
+    const bankOwner = localStorage.getItem('huma_farm_bank_owner') || 'Mela Mufida';
+    const qrisMerchant = localStorage.getItem('huma_farm_qris_merchant') || 'Huma Farm';
+    const qrisImage = localStorage.getItem('huma_farm_qris_image') || 'images/qris_huma_farm.png';
+
+    const cardBankTitle = document.getElementById('card-bank-title');
+    const cardBankName = document.getElementById('card-bank-name');
+    const cardBankNumber = document.getElementById('card-bank-number');
+    const cardBankOwner = document.getElementById('card-bank-owner');
+    const cardQrisMerchant = document.getElementById('card-qris-merchant');
+    const cardQrisImg = document.getElementById('card-qris-img-preview');
+
+    if (cardBankTitle) cardBankTitle.textContent = `Rekening ${bankName}`;
+    if (cardBankName) cardBankName.textContent = bankName;
+    if (cardBankNumber) cardBankNumber.textContent = bankNumber;
+    if (cardBankOwner) cardBankOwner.textContent = bankOwner;
+    if (cardQrisMerchant) cardQrisMerchant.textContent = qrisMerchant;
+    if (cardQrisImg) cardQrisImg.src = qrisImage;
+
+    // Also populate edit form inputs
+    const inputBankName = document.getElementById('setting-bank-name');
+    const inputBankNumber = document.getElementById('setting-bank-number');
+    const inputBankOwner = document.getElementById('setting-bank-owner');
+    const inputQrisMerchant = document.getElementById('setting-qris-merchant');
+    const qrisPreviewSettings = document.getElementById('qris-preview-settings');
+
+    if (inputBankName) inputBankName.value = bankName;
+    if (inputBankNumber) inputBankNumber.value = bankNumber;
+    if (inputBankOwner) inputBankOwner.value = bankOwner;
+    if (inputQrisMerchant) inputQrisMerchant.value = qrisMerchant;
+    if (qrisPreviewSettings) qrisPreviewSettings.src = qrisImage;
+}
+
+function toggleBankEditForm(show) {
+    const summaryView = document.getElementById('payment-settings-summary-view');
+    const bankBox = document.getElementById('payment-bank-edit-box');
+    const qrisBox = document.getElementById('payment-qris-edit-box');
+
+    if (show) {
+        if (summaryView) summaryView.style.display = 'none';
+        if (qrisBox) qrisBox.style.display = 'none';
+        if (bankBox) bankBox.style.display = 'block';
+    } else {
+        if (bankBox) bankBox.style.display = 'none';
+        if (qrisBox) qrisBox.style.display = 'none';
+        if (summaryView) summaryView.style.display = 'flex';
+    }
+}
+
+function toggleQrisEditForm(show) {
+    const summaryView = document.getElementById('payment-settings-summary-view');
+    const bankBox = document.getElementById('payment-bank-edit-box');
+    const qrisBox = document.getElementById('payment-qris-edit-box');
+
+    if (show) {
+        if (summaryView) summaryView.style.display = 'none';
+        if (bankBox) bankBox.style.display = 'none';
+        if (qrisBox) qrisBox.style.display = 'block';
+    } else {
+        if (bankBox) bankBox.style.display = 'none';
+        if (qrisBox) qrisBox.style.display = 'none';
+        if (summaryView) summaryView.style.display = 'flex';
+    }
+}
+
+function switchQrisInputTab(mode) {
+    activeQrisInputMode = mode;
+    const btnUpload = document.getElementById('qris-input-tab-upload');
+    const btnString = document.getElementById('qris-input-tab-string');
+    const boxUpload = document.getElementById('qris-box-tab-upload');
+    const boxString = document.getElementById('qris-box-tab-string');
+
+    if (mode === 'upload') {
+        if (btnUpload) { btnUpload.className = 'btn btn-ranch'; }
+        if (btnString) { btnString.className = 'btn btn-outline'; }
+        if (boxUpload) boxUpload.style.display = 'block';
+        if (boxString) boxString.style.display = 'none';
+    } else {
+        if (btnUpload) { btnUpload.className = 'btn btn-outline'; }
+        if (btnString) { btnString.className = 'btn btn-ranch'; }
+        if (boxUpload) boxUpload.style.display = 'none';
+        if (boxString) boxString.style.display = 'block';
+    }
+}
+
+function handleQrisCodeStringInput(val) {
+    const previewEl = document.getElementById('qris-preview-settings');
+    const cleaned = val.trim();
+    if (cleaned && previewEl) {
+        previewEl.src = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(cleaned);
+    }
+}
+
 async function handleQrisFileSelect(input) {
     const statusEl = document.getElementById('upload-qris-status');
     const previewEl = document.getElementById('qris-preview-settings');
@@ -1707,7 +3251,6 @@ async function handleQrisFileSelect(input) {
         statusEl.style.color = 'var(--ranch-amber)'; 
     }
 
-    // Show preview immediately using FileReader
     const reader = new FileReader();
     reader.onload = function(e) {
         if (previewEl) previewEl.src = e.target.result;
@@ -1715,52 +3258,105 @@ async function handleQrisFileSelect(input) {
     reader.readAsDataURL(file);
 }
 
+async function handleUpdateBankSubmit(e) {
+    e.preventDefault();
+    const bankName = document.getElementById('setting-bank-name').value.trim();
+    const bankNumber = document.getElementById('setting-bank-number').value.trim();
+    const bankOwner = document.getElementById('setting-bank-owner').value.trim();
+
+    if (!bankName || !bankNumber || !bankOwner) {
+        return showNotificationModal('Form Belum Lengkap', 'Semua kolom rekening bank wajib diisi!', '⚠️', 'error');
+    }
+
+    showNotificationModal('Sedang Menyimpan...', 'Menyimpan data rekening bank...', '☁️', 'info');
+
+    try {
+        await apiRequest('/settings/bank', 'POST', {
+            bank_name: bankName,
+            bank_number: bankNumber,
+            bank_owner: bankOwner
+        });
+
+        localStorage.setItem('huma_farm_bank_name', bankName);
+        localStorage.setItem('huma_farm_bank_number', bankNumber);
+        localStorage.setItem('huma_farm_bank_owner', bankOwner);
+
+        await fetchCloudData();
+        updatePaymentSettingsSummaryCards();
+        toggleBankEditForm(false);
+        showNotificationModal('Data Bank Diperbarui!', `Rekening ${bankName} (${bankNumber} a.n ${bankOwner}) berhasil disimpan.`, '🏦', 'success');
+    } catch (err) {
+        console.error('API Bank submit error:', err);
+        handleCrudError(err, 'Gagal Memperbarui', 'Gagal menyimpan data rekening bank.');
+    }
+}
+
 async function handleUpdateQrisSubmit(e) {
     e.preventDefault();
-    const qrisUrl = document.getElementById('setting-qris-url').value.trim();
     const merchantInput = document.getElementById('setting-qris-merchant');
     const merchantName = merchantInput ? merchantInput.value.trim() : 'Huma Farm';
     const fileInput = document.getElementById('setting-qris-file');
+    const codeStringInput = document.getElementById('setting-qris-code-string');
+    const previewEl = document.getElementById('qris-preview-settings');
 
     const formData = new FormData();
     formData.append('qris_merchant', merchantName);
-    if (fileInput && fileInput.files.length > 0) {
+
+    if (activeQrisInputMode === 'upload' && fileInput && fileInput.files.length > 0) {
         formData.append('qris_image', fileInput.files[0]);
-    } else {
-        formData.append('qris_url', qrisUrl);
+    } else if (activeQrisInputMode === 'string' && codeStringInput && codeStringInput.value.trim()) {
+        const generatedUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(codeStringInput.value.trim());
+        formData.append('qris_url', generatedUrl);
+    } else if (previewEl && previewEl.src) {
+        formData.append('qris_url', previewEl.src);
     }
 
     showNotificationModal('Sedang Menyimpan...', 'Mengunggah QRIS ke server...', '☁️', 'info');
 
     try {
+        const reqHeaders = {
+            'Accept': 'application/json'
+        };
+        const token = adminToken || localStorage.getItem('huma_farm_admin_token');
+        if (token) {
+            reqHeaders['X-Admin-Token'] = token;
+        }
+
         const response = await fetch('/api/settings/qris', {
             method: 'POST',
-            headers: {
-                'Accept': 'application/json'
-            },
+            headers: reqHeaders,
             body: formData
         });
         const res = await response.json();
         if (!response.ok) throw new Error(res.message || 'Gagal menyimpan QRIS.');
 
+        localStorage.setItem('huma_farm_qris_merchant', merchantName);
+        if (res.qris_image_url) {
+            localStorage.setItem('huma_farm_qris_image', normalizeQrisImageUrl(res.qris_image_url));
+        } else if (activeQrisInputMode === 'string' && codeStringInput && codeStringInput.value.trim()) {
+            const generatedUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(codeStringInput.value.trim());
+            localStorage.setItem('huma_farm_qris_image', generatedUrl);
+        }
+
         await fetchCloudData();
-        
+        updatePaymentSettingsSummaryCards();
+        toggleQrisEditForm(false);
+
         const statusEl = document.getElementById('upload-qris-status');
         if (statusEl) {
             statusEl.textContent = 'Tersimpan';
             statusEl.style.color = 'var(--ranch-green)';
         }
 
-        showNotificationModal('QRIS Diperbarui!', `Gambar QRIS dan nama merchant berhasil diperbarui.`, '📱', 'success');
+        showNotificationModal('QRIS Diperbarui!', `Gambar QRIS dan nama merchant (${merchantName}) berhasil disimpan.`, '📱', 'success');
     } catch(err) {
         console.error('API QRIS Submit Error:', err);
-        showNotificationModal('Gagal Memperbarui', 'Gagal menyimpan pengaturan QRIS ke server.', '❌', 'error');
+        handleCrudError(err, 'Gagal Memperbarui', 'Gagal menyimpan pengaturan QRIS ke server.');
     }
 }
 
 async function handleUpdatePhoneSubmit(e) {
     e.preventDefault();
-    // Fixed: HTML uses 'set-new-phone', not 'set-phone-input'
     const newPhone = document.getElementById('set-new-phone').value.trim();
     const confirmPass = document.getElementById('set-confirm-curr-pass').value.trim();
 
@@ -1775,7 +3371,7 @@ async function handleUpdatePhoneSubmit(e) {
         );
     }
 
-    if (!currentUser) {
+    if (currentRole !== 'admin' && !currentUser) {
         return showNotificationModal('Tidak Login', 'Anda harus login terlebih dahulu untuk mengubah nomor WA.', '⚠️', 'error');
     }
 
@@ -1783,18 +3379,26 @@ async function handleUpdatePhoneSubmit(e) {
     setButtonLoading(submitBtn, true);
 
     try {
+        const userId = (currentUser && currentUser.id) ? currentUser.id : 'admin_user_id';
         await apiRequest('/settings/profile', 'POST', {
-            id: currentUser.id,
+            id: userId,
+            role: currentRole,
             phone: newPhone,
             old_password: confirmPass
         });
         
-        currentUser.phone = newPhone;
-        localStorage.setItem('huma_farm_current_user', JSON.stringify(currentUser));
+        if (currentUser) {
+            currentUser.phone = newPhone;
+            localStorage.setItem('huma_farm_current_user', JSON.stringify(currentUser));
+        }
+        localStorage.setItem('huma_farm_admin_phone', newPhone);
+
         await fetchCloudData();
 
         document.getElementById('set-new-phone').value = '';
         document.getElementById('set-confirm-curr-pass').value = '';
+        loadSettingsPageData();
+        closeSettingsModal('modal-settings-phone');
         showNotificationModal(
             'Nomor WA Diperbarui!',
             `Nomor WhatsApp akun Anda berhasil diperbarui ke <strong>${newPhone}</strong>.`,
@@ -1811,7 +3415,6 @@ async function handleUpdatePhoneSubmit(e) {
 
 async function handleChangePasswordSubmit(e) {
     e.preventDefault();
-    // Fixed: HTML uses chg-old-pass / chg-new-pass / chg-confirm-pass
     const oldPass = document.getElementById('chg-old-pass').value.trim();
     const newPass = document.getElementById('chg-new-pass').value.trim();
     const confirmPass = document.getElementById('chg-confirm-pass').value.trim();
@@ -1838,38 +3441,22 @@ async function handleChangePasswordSubmit(e) {
         document.getElementById('chg-confirm-pass').value = '';
     };
 
-    if (currentRole === 'admin') {
-        // Admin: verify via API instead of hardcoded passwords
-        try {
-            await apiRequest('/settings/profile', 'POST', {
-                id: currentUser ? currentUser.id : 1,
-                old_password: oldPass,
-                password: newPass
-            });
-            clearFields();
-            showNotificationModal('Password Diperbarui!', 'Password admin berhasil diperbarui.', '🔑', 'success');
-        } catch (err) {
-            showNotificationModal('Password Lama Salah', err.message || 'Password lama yang Anda masukkan salah!', '🔑', 'error');
-        } finally {
-            setButtonLoading(submitBtn, false);
-        }
-    } else if (currentUser) {
-        try {
-            await apiRequest('/settings/profile', 'POST', {
-                id: currentUser.id,
-                old_password: oldPass,
-                password: newPass
-            });
-            await fetchCloudData();
-            clearFields();
-            showNotificationModal('Password Diperbarui!', 'Password akun Anda berhasil diperbarui di server.', '🔑', 'success');
-        } catch (err) {
-            console.error('API update password error:', err);
-            showNotificationModal('Gagal Memperbarui', err.message || 'Gagal memperbarui password.', '❌', 'error');
-        } finally {
-            setButtonLoading(submitBtn, false);
-        }
-    } else {
+    try {
+        const userId = (currentUser && currentUser.id) ? currentUser.id : 'admin_user_id';
+        await apiRequest('/settings/profile', 'POST', {
+            id: userId,
+            role: currentRole,
+            old_password: oldPass,
+            password: newPass
+        });
+        await fetchCloudData();
+        clearFields();
+        closeSettingsModal('modal-settings-password');
+        showNotificationModal('Password Diperbarui!', 'Password akun Anda berhasil diperbarui di server.', '🔑', 'success');
+    } catch (err) {
+        console.error('API update password error:', err);
+        showNotificationModal('Password Lama Salah', err.message || 'Password lama yang Anda masukkan salah!', '🔑', 'error');
+    } finally {
         setButtonLoading(submitBtn, false);
     }
 }
@@ -1987,6 +3574,11 @@ function closeInputPanenModal() {
     editingRecordId = null;
 }
 
+function closeSuccessPanenModal() {
+    const modal = document.getElementById('modal-success-panen');
+    if (modal) modal.classList.remove('active');
+}
+
 function changePanenQty(type, delta) {
     const inputEl = document.getElementById(`input-panen-${type}`);
     if (!inputEl) return;
@@ -1999,10 +3591,21 @@ function changePanenQty(type, delta) {
 async function handleInputPanenSubmit(e) {
     e.preventDefault();
 
-    const negeriQty = parseInt(document.getElementById('panen-negeri').value, 10) || 0;
-    const kampungQty = parseInt(document.getElementById('panen-kampung').value, 10) || 0;
-    const dateVal = document.getElementById('panen-date').value;
-    const reasonVal = document.getElementById('panen-reason').value.trim();
+    const negeriQty = parseInt(document.getElementById('input-panen-negeri').value, 10) || 0;
+    const kampungQty = parseInt(document.getElementById('input-panen-kampung').value, 10) || 0;
+    const dateVal = document.getElementById('input-panen-date').value;
+    
+    // Resolve the reason
+    const reasonSelect = document.getElementById('input-panen-reason');
+    const reasonCustomInput = document.getElementById('input-panen-reason-custom');
+    let reasonVal = '';
+    if (reasonSelect) {
+        if (reasonSelect.value === 'custom' && reasonCustomInput) {
+            reasonVal = reasonCustomInput.value.trim();
+        } else {
+            reasonVal = reasonSelect.value;
+        }
+    }
 
     if (negeriQty < 0 || kampungQty < 0) {
         return showNotificationModal('Jumlah Telur Salah', 'Jumlah telur tidak boleh bernilai negatif!', '⚠️', 'error');
@@ -2015,7 +3618,7 @@ async function handleInputPanenSubmit(e) {
     }
 
     const finalReason = currentPanenMode === 'add' 
-        ? (reasonVal || 'Hasil panen harian peternakan') 
+        ? 'Panen dari kandang' 
         : (reasonVal || 'Pengurangan konsumsi/sedekah');
 
     showNotificationModal('Sedang Menyimpan...', 'Mengunggah catatan panen ke server...', '☁️', 'info');
@@ -2031,15 +3634,40 @@ async function handleInputPanenSubmit(e) {
         });
         await fetchCloudData();
         closeInputPanenModal();
-        showNotificationModal(
-            'Catatan Disimpan!',
-            `Catatan panen/pengurangan telur berhasil disimpan.`,
-            '🟢',
-            'success'
-        );
+        
+        // Populate and show custom success modal
+        const isAdd = currentPanenMode === 'add';
+        const sign = isAdd ? '+' : '-';
+        
+        const succIcon = document.getElementById('succ-modal-icon');
+        const succTitle = document.getElementById('succ-modal-title');
+        const succSubtitle = document.getElementById('succ-modal-subtitle');
+        const succQtyNegeri = document.getElementById('succ-qty-negeri');
+        const succQtyKampung = document.getElementById('succ-qty-kampung');
+        const succDate = document.getElementById('succ-date-val');
+
+        if (succIcon) succIcon.textContent = isAdd ? '🎉' : '➖';
+        if (succTitle) succTitle.textContent = isAdd ? 'Hasil Panen Berhasil Diinput!' : 'Stok Telur Berhasil Dikurangi!';
+        if (succSubtitle) succSubtitle.textContent = isAdd ? 'Catatan penambahan stok telur panen harian berhasil disimpan.' : 'Catatan pengurangan stok telur berhasil disimpan.';
+        
+        if (succQtyNegeri) {
+            succQtyNegeri.textContent = `${sign}${negeriQty} Butir`;
+            succQtyNegeri.style.color = isAdd ? 'var(--ranch-amber)' : 'var(--ranch-rose)';
+        }
+        if (succQtyKampung) {
+            succQtyKampung.textContent = `${sign}${kampungQty} Butir`;
+            succQtyKampung.style.color = isAdd ? 'var(--ranch-green)' : 'var(--ranch-rose)';
+        }
+        if (succDate) succDate.textContent = formatIndonesianDate(dateVal);
+
+        closeSystemNotificationModal(); // Close loading notification modal automatically before showing success modal
+
+        const succModal = document.getElementById('modal-success-panen');
+        if (succModal) succModal.classList.add('active');
     } catch (err) {
+        closeSystemNotificationModal(); // Close loading notification modal on error
         console.error('API panen submit error:', err);
-        showNotificationModal('Gagal Menyimpan', 'Gagal menyinkronkan data panen ke server.', '❌', 'error');
+        handleCrudError(err, 'Gagal Menyimpan', 'Gagal menyinkronkan data panen ke server.');
     }
 }
 
@@ -2077,7 +3705,7 @@ async function executeDeletePanenRecord() {
         );
     } catch (err) {
         console.error('API delete panen error:', err);
-        showNotificationModal('Gagal Menghapus', 'Gagal menghapus data dari server.', '❌', 'error');
+        handleCrudError(err, 'Gagal Menghapus', 'Gagal menghapus data dari server.');
     }
 }
 
@@ -2105,8 +3733,29 @@ function closeLogoutConfirmModal() {
     if (modal) modal.classList.remove('active');
 }
 
+function openSettingsModal(id) {
+    const modal = document.getElementById(id);
+    if (modal) {
+        modal.classList.add('active');
+        if (id === 'modal-settings-avatar') {
+            loadSettingsPageData();
+        } else if (id === 'modal-settings-payment') {
+            updatePaymentSettingsSummaryCards();
+            toggleBankEditForm(false);
+            toggleQrisEditForm(false);
+        }
+    }
+}
+
+function closeSettingsModal(id) {
+    const modal = document.getElementById(id);
+    if (modal) modal.classList.remove('active');
+}
+
 function confirmLogoutAction() {
     closeLogoutConfirmModal();
+    // Stop the periodic session checker
+    stopAdminSessionChecker();
     currentRole = 'visitor';
     currentUser = null;
     // Clear admin token so session is fully invalidated
@@ -2114,8 +3763,82 @@ function confirmLogoutAction() {
     localStorage.removeItem('huma_farm_admin_token');
     localStorage.setItem('huma_farm_role', 'visitor');
     localStorage.removeItem('huma_farm_current_user');
+    sessionStorage.removeItem('huma_farm_active_page');
     updateRoleVisibility();
     showCenterWelcome();
+}
+
+// ============================================================
+// SESSION EXPIRED MODAL - Shown when admin token is invalid
+// ============================================================
+
+function showSessionExpiredModal() {
+    // First perform the logout silently (switch to visitor mode)
+    currentRole = 'visitor';
+    currentUser = null;
+    adminToken = null;
+    localStorage.removeItem('huma_farm_admin_token');
+    localStorage.setItem('huma_farm_role', 'visitor');
+    localStorage.removeItem('huma_farm_current_user');
+    sessionStorage.removeItem('huma_farm_active_page');
+    updateRoleVisibility();
+    navigateTo('dashboard');
+
+    // Stop the session checker if running
+    if (window._adminSessionCheckerInterval) {
+        clearInterval(window._adminSessionCheckerInterval);
+        window._adminSessionCheckerInterval = null;
+    }
+
+    // Show the session expired modal
+    const modal = document.getElementById('modal-session-expired');
+    if (modal) modal.classList.add('active');
+}
+
+function closeSessionExpiredModal() {
+    const modal = document.getElementById('modal-session-expired');
+    if (modal) modal.classList.remove('active');
+}
+
+// ============================================================
+// ADMIN SESSION CHECKER - Ping server every 5 minutes to detect expired token
+// ============================================================
+
+function startAdminSessionChecker() {
+    // Clear any existing checker first
+    if (window._adminSessionCheckerInterval) {
+        clearInterval(window._adminSessionCheckerInterval);
+    }
+    // Check every 5 minutes (300000ms)
+    window._adminSessionCheckerInterval = setInterval(async () => {
+        if (currentRole !== 'admin' || !adminToken) {
+            clearInterval(window._adminSessionCheckerInterval);
+            window._adminSessionCheckerInterval = null;
+            return;
+        }
+        try {
+            // Ping the auth check endpoint to verify token is still valid
+            const resp = await fetch(`${API_BASE}/auth/check`, {
+                method: 'GET',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Admin-Token': adminToken
+                }
+            });
+            if (resp.status === 401 || resp.status === 403) {
+                showSessionExpiredModal();
+            }
+        } catch (e) {
+            // Network error — ignore silently, don't log out
+        }
+    }, 5 * 60 * 1000);
+}
+
+function stopAdminSessionChecker() {
+    if (window._adminSessionCheckerInterval) {
+        clearInterval(window._adminSessionCheckerInterval);
+        window._adminSessionCheckerInterval = null;
+    }
 }
 
 function openUnifiedAuthModal(tab) {
@@ -2203,6 +3926,9 @@ async function handleUnifiedLoginSubmit(e) {
                 await fetchCloudData();
                 updateRoleVisibility();
                 showCenterWelcome();
+
+                // Start periodic session validity checker
+                startAdminSessionChecker();
             }
         } catch (err) {
             showNotificationModal('Password Salah', err.message || 'Password admin yang Anda masukkan salah!', '🔑', 'error');
@@ -2413,11 +4139,111 @@ async function handleResetPasswordSubmit(e) {
 // MODULE: DOMPET & KEUANGAN (WALLET & EXPENSES ENGINE)
 // ============================================================
 
+let currentCashFlowType = 'expense'; // 'expense' | 'income'
+
+function switchCashFlowTab(type) {
+    currentCashFlowType = type || 'expense';
+
+    const tabExpense = document.getElementById('tab-cashflow-expense');
+    const tabIncome = document.getElementById('tab-cashflow-income');
+
+    const modalTitle = document.getElementById('cashflow-modal-title');
+    const modalSub = document.getElementById('cashflow-modal-subtitle');
+    const catLabel = document.getElementById('cashflow-category-label');
+    const catSelect = document.getElementById('expense-category');
+    const amtLabel = document.getElementById('cashflow-amount-label');
+    const submitBtn = document.getElementById('cashflow-submit-btn');
+
+    if (currentCashFlowType === 'expense') {
+        if (tabExpense) {
+            tabExpense.className = 'btn btn-ranch';
+            tabExpense.style.background = '';
+        }
+        if (tabIncome) {
+            tabIncome.className = 'btn btn-outline';
+        }
+
+        if (modalTitle) modalTitle.textContent = '📤 Catat Pengeluaran Kas Usaha';
+        if (modalSub) modalSub.textContent = 'Masukkan pengeluaran kas untuk operasional kandang, pakan, obat, dll.';
+        if (catLabel) catLabel.textContent = '📌 Kategori Pengeluaran:';
+        if (amtLabel) amtLabel.textContent = '💰 Jumlah Nominal Pengeluaran (Rp):';
+
+        if (catSelect) {
+            catSelect.innerHTML = `
+                <option value="Pembelian Pakan">🌾 Pembelian Pakan Ayam</option>
+                <option value="Obat & Vitamin">💊 Obat, Nutrisi & Vitamin</option>
+                <option value="Peralatan Kandang">🛠️ Peralatan & Perawatan Kandang</option>
+                <option value="Gaji & Operasional">👷 Gaji & Biaya Operasional</option>
+                <option value="custom">✏️ + Kategori Lainnya (Ketik Manual)...</option>
+            `;
+        }
+
+        if (submitBtn) {
+            submitBtn.innerHTML = '💸 Simpan Pengeluaran';
+            submitBtn.style.background = 'linear-gradient(135deg, #be123c, #e11d48)';
+            submitBtn.style.borderColor = 'rgba(225,29,72,0.4)';
+        }
+    } else {
+        if (tabIncome) {
+            tabIncome.className = 'btn btn-ranch';
+            tabIncome.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+        }
+        if (tabExpense) {
+            tabExpense.className = 'btn btn-outline';
+        }
+
+        if (modalTitle) modalTitle.textContent = '📥 Catat Pemasukan Kas Usaha';
+        if (modalSub) modalSub.textContent = 'Masukkan kas uang masuk non-toko, hasil penjualan afkir, modal, dll.';
+        if (catLabel) catLabel.textContent = '📌 Kategori Pemasukan:';
+        if (amtLabel) amtLabel.textContent = '💰 Jumlah Nominal Pemasukan (Rp):';
+
+        if (catSelect) {
+            catSelect.innerHTML = `
+                <option value="Penjualan Off-Grid">🥚 Penjualan Telur Non-Toko / Off-Grid</option>
+                <option value="Penjualan Afkir">📦 Penjualan Ayam / Afkir</option>
+                <option value="Injeksi Modal">💵 Modal / Injeksi Kas Tambahan</option>
+                <option value="Subsidi / Lainnya">🎁 Hibah / Subsidi / Lainnya</option>
+                <option value="custom">✏️ + Kategori Lainnya (Ketik Manual)...</option>
+            `;
+        }
+
+        if (submitBtn) {
+            submitBtn.innerHTML = '📥 Simpan Pemasukan';
+            submitBtn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+            submitBtn.style.borderColor = 'rgba(16,185,129,0.4)';
+        }
+    }
+
+    if (catSelect) handleCashFlowCategoryChange(catSelect);
+}
+
+function handleCashFlowCategoryChange(selectEl) {
+    const customRow = document.getElementById('cashflow-custom-cat-row');
+    const customInput = document.getElementById('expense-custom-category');
+    if (!customRow) return;
+
+    if (selectEl && selectEl.value === 'custom') {
+        customRow.style.display = 'block';
+        if (customInput) customInput.focus();
+    } else {
+        customRow.style.display = 'none';
+        if (customInput) customInput.value = '';
+    }
+}
+
+function updateDashboardData() {
+    if (typeof renderKeuanganData === 'function') {
+        renderKeuanganData();
+    }
+}
+
 function renderKeuanganData() {
     const orders = JSON.parse(localStorage.getItem('huma_farm_orders') || '[]');
     const expenses = JSON.parse(localStorage.getItem('huma_farm_expenses') || '[]');
 
-    // Calculate total income from completed/lunas orders
+    const knownIncomeCategories = ['Injeksi Modal', 'Penjualan Off-Grid', 'Penjualan Afkir', 'Subsidi / Lainnya', 'Pemasukan Kas'];
+
+    // Calculate total income from completed/lunas orders AND cash flow income entries
     let totalIncome = 0;
     orders.forEach(o => {
         if (o.paymentStatus === 'Lunas') {
@@ -2425,10 +4251,14 @@ function renderKeuanganData() {
         }
     });
 
-    // Calculate total expenses
     let totalExpense = 0;
     expenses.forEach(e => {
-        totalExpense += (e.amount || 0);
+        const isInc = e.type === 'income' || (!e.type && knownIncomeCategories.includes(e.category));
+        if (isInc) {
+            totalIncome += (e.amount || 0);
+        } else {
+            totalExpense += (e.amount || 0);
+        }
     });
 
     const netBalance = totalIncome - totalExpense;
@@ -2442,37 +4272,78 @@ function renderKeuanganData() {
     if (incEl) incEl.textContent = 'Rp ' + totalIncome.toLocaleString('id-ID');
     if (expEl) expEl.textContent = 'Rp ' + totalExpense.toLocaleString('id-ID');
 
+    // Calculate Unique Customer Count from order history
+    const customerSet = new Set();
+    orders.forEach(o => {
+        const name = (o.buyerName || '').trim().toLowerCase();
+        const phone = formatPhoneNumberForWa(o.buyerPhone || o.phone || '');
+        if (name && name !== 'pengunjung' && name !== 'visitor') {
+            customerSet.add(`${name}|${phone}`);
+        }
+    });
+
     // Also update Dashboard KPI Cards if Admin
     const kpiInc = document.getElementById('kpi-income-val');
     const kpiExp = document.getElementById('kpi-expense-val');
     const kpiBal = document.getElementById('kpi-balance-val');
+    const kpiCust = document.getElementById('kpi-customers-val');
+
     if (kpiInc) kpiInc.textContent = 'Rp ' + totalIncome.toLocaleString('id-ID');
     if (kpiExp) kpiExp.textContent = 'Rp ' + totalExpense.toLocaleString('id-ID');
     if (kpiBal) kpiBal.textContent = 'Rp ' + netBalance.toLocaleString('id-ID');
+    if (kpiCust) kpiCust.textContent = customerSet.size;
 
     // Render Transactions History (Combined Pemasukan & Pengeluaran)
     const container = document.getElementById('wallet-transaction-list');
     if (!container) return;
 
     let mutasiList = [];
+
+    // Group Lunas store orders by base order ID (#ORD-xxxx) to avoid duplicate rows for multi-item/reward orders
+    const storeOrderGroupMap = {};
     orders.forEach(o => {
         if (o.paymentStatus === 'Lunas') {
-            mutasiList.push({
-                id: o.id,
-                type: 'income',
-                category: `Penjualan Toko (${o.buyerName || 'Pembeli'})`,
-                amount: o.totalPrice,
-                note: `${o.qty} ${o.unit === 'pack' ? 'Pack' : 'Butir'} ${o.category === 'negeri' ? 'Telur Negeri' : 'Telur Kampung'}`,
-                date: o.createdAt ? o.createdAt.split('T')[0] : new Date().toISOString().split('T')[0]
-            });
+            const baseId = getBaseOrderId(o.id);
+            if (!storeOrderGroupMap[baseId]) {
+                storeOrderGroupMap[baseId] = {
+                    baseOrderId: baseId,
+                    buyerName: o.buyerName || 'Pembeli',
+                    totalAmount: 0,
+                    itemSummaries: [],
+                    date: o.createdAt ? o.createdAt.split('T')[0] : (o.date || new Date().toISOString().split('T')[0])
+                };
+            }
+
+            storeOrderGroupMap[baseId].totalAmount += (o.totalPrice || 0);
+
+            let label = `${o.qty} ${o.unit === 'pack' ? 'Pack' : 'Butir'} ${o.category === 'negeri' ? 'Telur Negeri' : 'Telur Kampung'}`;
+            if (o.totalPrice === 0 || o.category === 'reward') {
+                label = `🎁 ${o.qty} ${o.unit === 'pack' ? 'Pack' : 'Butir'} Telur Kampung (Bonus)`;
+            }
+            storeOrderGroupMap[baseId].itemSummaries.push(label);
         }
     });
 
+    Object.values(storeOrderGroupMap).forEach(g => {
+        mutasiList.push({
+            id: `group_${g.baseOrderId}`,
+            baseOrderId: g.baseOrderId,
+            type: 'income',
+            isStoreOrder: true,
+            category: `Penjualan Toko (${g.buyerName})`,
+            amount: g.totalAmount,
+            note: g.itemSummaries.join(' + '),
+            date: g.date
+        });
+    });
+
     expenses.forEach(e => {
+        const isInc = e.type === 'income' || (!e.type && knownIncomeCategories.includes(e.category));
         mutasiList.push({
             id: e.id,
-            type: 'expense',
-            category: e.category || 'Pengeluaran Kas',
+            type: isInc ? 'income' : 'expense',
+            isManualCashFlow: true,
+            category: e.category || (isInc ? 'Pemasukan Kas' : 'Pengeluaran Kas'),
             amount: e.amount,
             note: e.note || '-',
             date: e.date
@@ -2496,19 +4367,31 @@ function renderKeuanganData() {
         const icon = isIncome ? '📥' : '📤';
         const colorClass = isIncome ? 'text-green' : 'text-rose';
         const prefix = isIncome ? '+ Rp ' : '- Rp ';
+        const canEditOrDelete = item.isManualCashFlow && currentRole === 'admin';
+
+        const orderBadge = item.isStoreOrder && item.baseOrderId ? 
+            `<span style="font-size: 0.65rem; background: var(--ranch-amber-light, rgba(245,158,11,0.15)); color: var(--ranch-amber, #f59e0b); padding: 1px 6px; border-radius: 4px; border: 1px solid rgba(245,158,11,0.3); font-weight: 700;">📦 #${item.baseOrderId}</span>` : '';
 
         return `
             <div style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 12px;">
                 <div style="display: flex; align-items: center; gap: 8px;">
-                    <span style="font-size: 1.2rem; width: 30px; height: 30px; background: var(--bg-card); border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 1px solid var(--border-color);">${icon}</span>
+                    <span style="font-size: 1.2rem; width: 32px; height: 32px; background: var(--bg-card); border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 1px solid var(--border-color); flex-shrink: 0;">${icon}</span>
                     <div>
-                        <strong style="font-size: 0.8rem; color: var(--text-main); display: block;">${item.category}</strong>
-                        <span style="font-size: 0.68rem; color: var(--text-muted);">${item.note} • 📅 ${formatIndonesianDate(item.date)}</span>
+                        <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                            <strong style="font-size: 0.8rem; color: var(--text-main);">${item.category}</strong>
+                            ${orderBadge}
+                        </div>
+                        <span style="font-size: 0.68rem; color: var(--text-muted); display: block; margin-top: 2px;">${item.note} • 📅 ${formatIndonesianDate(item.date)}</span>
                     </div>
                 </div>
-                <div style="text-align: right;">
+                <div style="text-align: right; flex-shrink: 0;">
                     <strong style="font-size: 0.88rem;" class="${colorClass}">${prefix}${item.amount.toLocaleString('id-ID')}</strong>
-                    ${!isIncome ? `<button class="btn btn-rose" style="font-size: 0.62rem; padding: 1px 6px; min-height: 20px; margin-top: 2px;" onclick="deleteExpenseRecord('${item.id}')">Hapus</button>` : ''}
+                    ${canEditOrDelete ? `
+                        <div style="display: flex; gap: 4px; justify-content: flex-end; margin-top: 4px;">
+                            <button class="btn btn-outline" style="font-size: 0.62rem; padding: 1px 6px; min-height: 20px;" onclick="openEditCashFlowModal('${item.id}')">✏️ Edit</button>
+                            <button class="btn btn-rose" style="font-size: 0.62rem; padding: 1px 6px; min-height: 20px;" onclick="deleteExpenseRecord('${item.id}')">🗑️ Hapus</button>
+                        </div>
+                    ` : ''}
                 </div>
             </div>
         `;
@@ -2521,9 +4404,13 @@ function openInputPengeluaranModal() {
     const amt = document.getElementById('expense-amount');
     const note = document.getElementById('expense-note');
     const dt = document.getElementById('expense-date');
+    const customInput = document.getElementById('expense-custom-category');
     if (amt) amt.value = '';
     if (note) note.value = '';
+    if (customInput) customInput.value = '';
     if (dt) dt.value = new Date().toISOString().split('T')[0];
+
+    switchCashFlowTab('expense');
     modal.classList.add('active');
 }
 
@@ -2534,458 +4421,411 @@ function closeInputPengeluaranModal() {
 
 async function handleInputPengeluaranSubmit(e) {
     e.preventDefault();
-    const category = document.getElementById('expense-category').value;
+    const catSelect = document.getElementById('expense-category');
+    let category = catSelect ? catSelect.value : 'Lain-lain';
+
+    if (category === 'custom') {
+        const customInput = document.getElementById('expense-custom-category');
+        const customVal = customInput ? customInput.value.trim() : '';
+        if (!customVal) {
+            showNotificationModal('Kategori Kosong', 'Silakan ketik nama kategori kustom Anda.', '✏️', 'error');
+            return;
+        }
+        category = customVal;
+    }
+
     const amount = parseInt(document.getElementById('expense-amount').value, 10) || 0;
     const note = document.getElementById('expense-note').value.trim();
     const date = document.getElementById('expense-date').value || new Date().toISOString().split('T')[0];
+    const type = currentCashFlowType || 'expense';
 
     if (amount <= 0) return;
 
-    showNotificationModal('Sedang Menyimpan...', 'Mengunggah data pengeluaran ke server...', '☁️', 'info');
+    const actionText = type === 'income' ? 'pemasukan' : 'pengeluaran';
+    showNotificationModal('Sedang Menyimpan...', `Mengunggah data ${actionText} ke server...`, '☁️', 'info');
     try {
         await apiRequest('/expenses', 'POST', {
+            type,
             category,
             amount,
             note,
             date
         });
         await fetchCloudData();
+        renderKeuanganData();
+        updateDashboardData();
         closeInputPengeluaranModal();
+
+        const successTitle = type === 'income' ? 'Pemasukan Disimpan!' : 'Pengeluaran Disimpan!';
+        const successIcon = type === 'income' ? '📥' : '💸';
         showNotificationModal(
-            'Pengeluaran Disimpan!',
-            `Pengeluaran kas sebesar <strong>Rp ${amount.toLocaleString('id-ID')}</strong> (${category}) telah dicatat ke kas dompet.`,
-            '💸',
+            successTitle,
+            `Transaksi ${actionText} kas sebesar <strong>Rp ${amount.toLocaleString('id-ID')}</strong> (${category}) telah dicatat ke kas dompet.`,
+            successIcon,
             'success'
         );
     } catch (err) {
-        console.error('API insert expense error:', err);
-        showNotificationModal('Gagal Menyimpan', 'Gagal menyinkronkan data pengeluaran ke server.', '❌', 'error');
+        console.error('API insert expense/income error:', err);
+        handleCrudError(err, 'Gagal Menyimpan', `Gagal menyinkronkan data ${actionText} ke server.`);
+    }
+}
+
+// EDIT CASH FLOW ENGINE
+let currentEditCashFlowType = 'expense';
+
+function switchEditCashFlowTab(type, targetCategory = null) {
+    currentEditCashFlowType = type || 'expense';
+
+    const tabExpense = document.getElementById('tab-edit-cashflow-expense');
+    const tabIncome = document.getElementById('tab-edit-cashflow-income');
+
+    const modalTitle = document.getElementById('edit-cashflow-modal-title');
+    const catLabel = document.getElementById('edit-cashflow-category-label');
+    const catSelect = document.getElementById('edit-expense-category');
+    const amtLabel = document.getElementById('edit-cashflow-amount-label');
+    const submitBtn = document.getElementById('edit-cashflow-submit-btn');
+
+    if (currentEditCashFlowType === 'expense') {
+        if (tabExpense) {
+            tabExpense.className = 'btn btn-ranch';
+            tabExpense.style.background = '';
+        }
+        if (tabIncome) {
+            tabIncome.className = 'btn btn-outline';
+        }
+
+        if (modalTitle) modalTitle.textContent = '✏️ Edit Catatan Pengeluaran';
+        if (catLabel) catLabel.textContent = '📌 Kategori Pengeluaran:';
+        if (amtLabel) amtLabel.textContent = '💰 Jumlah Nominal Pengeluaran (Rp):';
+
+        if (catSelect) {
+            catSelect.innerHTML = `
+                <option value="Pembelian Pakan">🌾 Pembelian Pakan Ayam</option>
+                <option value="Obat & Vitamin">💊 Obat, Nutrisi & Vitamin</option>
+                <option value="Peralatan Kandang">🛠️ Peralatan & Perawatan Kandang</option>
+                <option value="Gaji & Operasional">👷 Gaji & Biaya Operasional</option>
+                <option value="custom">✏️ + Kategori Lainnya (Ketik Manual)...</option>
+            `;
+        }
+
+        if (submitBtn) {
+            submitBtn.innerHTML = '💾 Simpan Perubahan';
+            submitBtn.style.background = 'linear-gradient(135deg, #be123c, #e11d48)';
+            submitBtn.style.borderColor = 'rgba(225,29,72,0.4)';
+        }
+    } else {
+        if (tabIncome) {
+            tabIncome.className = 'btn btn-ranch';
+            tabIncome.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+        }
+        if (tabExpense) {
+            tabExpense.className = 'btn btn-outline';
+        }
+
+        if (modalTitle) modalTitle.textContent = '✏️ Edit Catatan Pemasukan';
+        if (catLabel) catLabel.textContent = '📌 Kategori Pemasukan:';
+        if (amtLabel) amtLabel.textContent = '💰 Jumlah Nominal Pemasukan (Rp):';
+
+        if (catSelect) {
+            catSelect.innerHTML = `
+                <option value="Penjualan Off-Grid">🥚 Penjualan Telur Non-Toko / Off-Grid</option>
+                <option value="Penjualan Afkir">📦 Penjualan Ayam / Afkir</option>
+                <option value="Injeksi Modal">💵 Modal / Injeksi Kas Tambahan</option>
+                <option value="Subsidi / Lainnya">🎁 Hibah / Subsidi / Lainnya</option>
+                <option value="custom">✏️ + Kategori Lainnya (Ketik Manual)...</option>
+            `;
+        }
+
+        if (submitBtn) {
+            submitBtn.innerHTML = '💾 Simpan Perubahan';
+            submitBtn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+            submitBtn.style.borderColor = 'rgba(16,185,129,0.4)';
+        }
+    }
+
+    if (catSelect && targetCategory) {
+        const templateOptions = Array.from(catSelect.options).map(o => o.value);
+        const customRow = document.getElementById('edit-cashflow-custom-cat-row');
+        const customInput = document.getElementById('edit-expense-custom-category');
+
+        if (templateOptions.includes(targetCategory)) {
+            catSelect.value = targetCategory;
+            if (customRow) customRow.style.display = 'none';
+            if (customInput) customInput.value = '';
+        } else {
+            catSelect.value = 'custom';
+            if (customRow) customRow.style.display = 'block';
+            if (customInput) customInput.value = targetCategory;
+        }
+    } else if (catSelect) {
+        handleEditCashFlowCategoryChange(catSelect);
+    }
+}
+
+function handleEditCashFlowCategoryChange(selectEl) {
+    const customRow = document.getElementById('edit-cashflow-custom-cat-row');
+    const customInput = document.getElementById('edit-expense-custom-category');
+    if (!customRow) return;
+
+    if (selectEl && selectEl.value === 'custom') {
+        customRow.style.display = 'block';
+        if (customInput) customInput.focus();
+    } else {
+        customRow.style.display = 'none';
+        if (customInput) customInput.value = '';
+    }
+}
+
+function openEditCashFlowModal(id) {
+    const expenses = JSON.parse(localStorage.getItem('huma_farm_expenses') || '[]');
+    const item = expenses.find(e => e.id === id);
+    if (!item) {
+        showNotificationModal('Tidak Ditemukan', 'Catatan cashflow tidak ditemukan!', '⚠️', 'error');
+        return;
+    }
+
+    const modal = document.getElementById('modal-edit-cashflow');
+    if (!modal) return;
+
+    const knownIncomeCategories = ['Injeksi Modal', 'Penjualan Off-Grid', 'Penjualan Afkir', 'Subsidi / Lainnya', 'Pemasukan Kas'];
+    const itemType = item.type || (knownIncomeCategories.includes(item.category) ? 'income' : 'expense');
+
+    document.getElementById('edit-expense-id').value = item.id;
+    document.getElementById('edit-expense-amount').value = item.amount || '';
+    document.getElementById('edit-expense-note').value = item.note || '';
+    document.getElementById('edit-expense-date').value = item.date ? item.date.split('T')[0] : new Date().toISOString().split('T')[0];
+
+    switchEditCashFlowTab(itemType, item.category);
+
+    modal.classList.add('active');
+}
+
+function closeEditCashFlowModal() {
+    const modal = document.getElementById('modal-edit-cashflow');
+    if (modal) modal.classList.remove('active');
+}
+
+async function handleEditCashFlowSubmit(e) {
+    e.preventDefault();
+    const id = document.getElementById('edit-expense-id').value;
+    const catSelect = document.getElementById('edit-expense-category');
+    let category = catSelect ? catSelect.value : 'Lain-lain';
+
+    if (category === 'custom') {
+        const customInput = document.getElementById('edit-expense-custom-category');
+        const customVal = customInput ? customInput.value.trim() : '';
+        if (!customVal) {
+            showNotificationModal('Kategori Kosong', 'Silakan ketik nama kategori kustom Anda.', '✏️', 'error');
+            return;
+        }
+        category = customVal;
+    }
+
+    const amount = parseInt(document.getElementById('edit-expense-amount').value, 10) || 0;
+    const note = document.getElementById('edit-expense-note').value.trim();
+    const date = document.getElementById('edit-expense-date').value || new Date().toISOString().split('T')[0];
+    const type = currentEditCashFlowType || 'expense';
+
+    if (amount <= 0) return;
+
+    showNotificationModal('Sedang Menyimpan...', 'Memperbarui catatan cash flow di server...', '☁️', 'info');
+    try {
+        await apiRequest(`/expenses/${id}`, 'PUT', {
+            type,
+            category,
+            amount,
+            note,
+            date
+        });
+        await fetchCloudData();
+        renderKeuanganData();
+        updateDashboardData();
+        closeEditCashFlowModal();
+
+        showNotificationModal(
+            'Catatan Diperbarui!',
+            `Catatan cash flow <strong>${category}</strong> (Rp ${amount.toLocaleString('id-ID')}) berhasil diperbarui.`,
+            '✏️',
+            'success'
+        );
+    } catch (err) {
+        console.error('API edit expense error:', err);
+        handleCrudError(err, 'Gagal Menyimpan', 'Gagal memperbarui catatan cash flow di server.');
     }
 }
 
 async function deleteExpenseRecord(id) {
-    showNotificationModal('Sedang Menghapus...', 'Menghapus pengeluaran di server...', '☁️', 'info');
+    showNotificationModal('Sedang Menghapus...', 'Menghapus catatan kas di server...', '☁️', 'info');
     try {
         await apiRequest(`/expenses/${id}`, 'DELETE');
         await fetchCloudData();
+        renderKeuanganData();
+        updateDashboardData();
         showNotificationModal(
             'Catatan Dihapus',
-            'Catatan pengeluaran berhasil dihapus.',
+            'Catatan mutasi kas berhasil dihapus.',
             '🗑️',
             'info'
         );
     } catch (err) {
         console.error('API delete expense error:', err);
-        showNotificationModal('Gagal Menghapus', 'Gagal menghapus data dari server.', '❌', 'error');
+        handleCrudError(err, 'Gagal Menghapus', 'Gagal menghapus data dari server.');
     }
 }
 
 // ============================================================
-// MODULE: DASHBOARD ANALYTICS & CHART.JS ENGINE
-// ============================================================
-
-let chartWeeklyInstance = null;
-let chartMonthlyInstance = null;
-let chartAllocationInstance = null;
-
-function updateDashboardData() {
-    const panenHistory = JSON.parse(localStorage.getItem('huma_farm_panen_history') || '[]');
-    const orders = JSON.parse(localStorage.getItem('huma_farm_orders') || '[]');
-    const registeredUsers = JSON.parse(localStorage.getItem('huma_farm_registered_users') || '[]');
-
-    // Calculate Harvest Totals
-    let totalHarvest = 0;
-    let totalSedekah = 0;
-
-    panenHistory.forEach(item => {
-        const n = item.negeri || 0;
-        const k = item.kampung || 0;
-        if (item.type === 'sub') {
-            totalSedekah += (n + k);
-        } else {
-            totalHarvest += (n + k);
-        }
-    });
-
-    // Calculate Sales Totals
-    let totalSoldEggs = 0;
-    let totalSoldPack = 0;
-    let totalSoldEcer = 0;
-
-    orders.forEach(o => {
-        if (o.paymentStatus === 'Lunas') {
-            totalSoldEggs += (o.totalEggs || 0);
-            if (o.unit === 'pack') totalSoldPack += (o.qty || 0);
-            else totalSoldEcer += (o.qty || 0);
-        }
-    });
-
-    // Update KPI Cards UI
-    const harvestVal = document.getElementById('kpi-harvest-val');
-    const soldVal = document.getElementById('kpi-sold-val');
-    const soldSub = document.getElementById('kpi-sold-sub');
-    const sedekahVal = document.getElementById('kpi-sedekah-val');
-    const custVal = document.getElementById('kpi-customers-val');
-
-    if (harvestVal) harvestVal.textContent = `${totalHarvest} Butir`;
-    if (soldVal) soldVal.textContent = `${totalSoldEggs} Butir`;
-    if (soldSub) soldSub.textContent = `${totalSoldPack} Pack + ${totalSoldEcer} Ecer`;
-    if (sedekahVal) sedekahVal.textContent = `${totalSedekah} Butir`;
-    if (custVal) custVal.textContent = `${registeredUsers.length} Pembeli`;
-
-    // Render Keuangan Data (Updates Financial KPIs)
-    renderKeuanganData();
-
-    // Render Charts
-    initDashboardCharts(panenHistory, orders);
-}
-
-function initDashboardCharts(panenHistory, orders) {
-    if (typeof Chart === 'undefined') return;
-
-    // --- CHART 1: 7-DAY HARVEST VS SALES LINE CHART ---
-    const ctxWeekly = document.getElementById('chartWeeklyHarvestSales');
-    if (ctxWeekly) {
-        const labels = [];
-        const harvestData = [0, 0, 0, 0, 0, 0, 0];
-        const salesData = [0, 0, 0, 0, 0, 0, 0];
-
-        const today = new Date();
-        for (let i = 6; i >= 0; i--) {
-            const d = new Date(today);
-            d.setDate(today.getDate() - i);
-            const dateStr = d.toISOString().split('T')[0];
-            labels.push(d.toLocaleDateString('id-ID', { weekday: 'short', day: 'numeric' }));
-
-            panenHistory.filter(p => p.type !== 'sub' && (p.date === dateStr || p.createdAt?.startsWith(dateStr)))
-                .forEach(p => { harvestData[6 - i] += ((p.negeri || 0) + (p.kampung || 0)); });
-
-            orders.filter(o => o.paymentStatus === 'Lunas' && o.createdAt?.startsWith(dateStr))
-                .forEach(o => { salesData[6 - i] += (o.totalEggs || 0); });
-        }
-
-        if (chartWeeklyInstance) chartWeeklyInstance.destroy();
-        chartWeeklyInstance = new Chart(ctxWeekly, {
-            type: 'line',
-            data: {
-                labels,
-                datasets: [
-                    {
-                        label: 'Panen (Butir)',
-                        data: harvestData,
-                        borderColor: '#f59e0b',
-                        backgroundColor: 'rgba(245, 158, 11, 0.15)',
-                        fill: true,
-                        tension: 0.35
-                    },
-                    {
-                        label: 'Terjual (Butir)',
-                        data: salesData,
-                        borderColor: '#10b981',
-                        backgroundColor: 'rgba(16, 185, 129, 0.15)',
-                        fill: true,
-                        tension: 0.35
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: { legend: { labels: { color: '#d1d5db', font: { size: 11 } } } },
-                scales: {
-                    x: { ticks: { color: '#9ca3af', font: { size: 10 } } },
-                    y: { ticks: { color: '#9ca3af', font: { size: 10 } }, beginAtZero: true }
-                }
-            }
-        });
-    }
-
-    // --- CHART 2: MONTHLY PRODUCTION BAR CHART (NEGERI VS KAMPUNG) ---
-    const ctxMonthly = document.getElementById('chartMonthlyProduction');
-    if (ctxMonthly) {
-        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
-        const negeriMonthly = new Array(12).fill(0);
-        const kampungMonthly = new Array(12).fill(0);
-
-        panenHistory.filter(p => p.type !== 'sub').forEach(p => {
-            const dateObj = new Date(p.createdAt || p.date);
-            const monthIdx = dateObj.getMonth();
-            if (monthIdx >= 0 && monthIdx < 12) {
-                negeriMonthly[monthIdx] += (p.negeri || 0);
-                kampungMonthly[monthIdx] += (p.kampung || 0);
-            }
-        });
-
-        if (chartMonthlyInstance) chartMonthlyInstance.destroy();
-        chartMonthlyInstance = new Chart(ctxMonthly, {
-            type: 'bar',
-            data: {
-                labels: monthNames,
-                datasets: [
-                    {
-                        label: 'Telur Negeri',
-                        data: negeriMonthly,
-                        backgroundColor: '#b06530'
-                    },
-                    {
-                        label: 'Telur Kampung',
-                        data: kampungMonthly,
-                        backgroundColor: '#10b981'
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: { legend: { labels: { color: '#d1d5db', font: { size: 11 } } } },
-                scales: {
-                    x: { ticks: { color: '#9ca3af', font: { size: 10 } } },
-                    y: { ticks: { color: '#9ca3af', font: { size: 10 } }, beginAtZero: true }
-                }
-            }
-        });
-    }
-
-    // --- CHART 3: ALLOCATION DISTRIBUTION DOUGHNUT CHART ---
-    const ctxAllocation = document.getElementById('chartAllocationDistribution');
-    if (ctxAllocation) {
-        let totalSold = 0;
-        orders.filter(o => o.paymentStatus === 'Lunas').forEach(o => totalSold += (o.totalEggs || 0));
-
-        let totalConsumsi = 0;
-        let totalBroken = 0;
-        panenHistory.filter(p => p.type === 'sub').forEach(p => {
-            const qty = (p.negeri || 0) + (p.kampung || 0);
-            if (p.reason && p.reason.toLowerCase().includes('pecah')) totalBroken += qty;
-            else totalConsumsi += qty;
-        });
-
-        if (chartAllocationInstance) chartAllocationInstance.destroy();
-        chartAllocationInstance = new Chart(ctxAllocation, {
-            type: 'doughnut',
-            data: {
-                labels: ['Terjual (Toko)', 'Dimakan / Sedekah', 'Pecah / Rusak'],
-                datasets: [{
-                    data: [totalSold, totalConsumsi, totalBroken],
-                    backgroundColor: ['#10b981', '#f59e0b', '#be123c']
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: { legend: { position: 'bottom', labels: { color: '#d1d5db', font: { size: 10 } } } }
-            }
-        });
-    }
-}
-
-// ============================================================
-// MODULE: LEADERBOARD RANKING ENGINE
+// LEADERBOARD / RANKING PEMBELI ENGINE
 // ============================================================
 
 function renderLeaderboardData() {
     const orders = JSON.parse(localStorage.getItem('huma_farm_orders') || '[]');
-    const registeredUsers = JSON.parse(localStorage.getItem('huma_farm_registered_users') || '[]');
-    const container = document.getElementById('leaderboard-ranking-list');
-    if (!container) return;
 
-    // Accumulate totals per unique buyer (Name + Last 4 WA Digits key)
-    const userTotals = {};
+    // Group all completed / Lunas orders by buyer identity (name + phone)
+    const buyerMap = {};
+    let totalEggsSoldAll = 0;
 
     orders.forEach(o => {
         if (o.paymentStatus === 'Lunas') {
             const rawName = (o.buyerName || 'Pembeli').trim();
-            const phone = (o.buyerPhone || '').replace(/\D/g, '');
-            const last4 = phone.length >= 4 ? phone.slice(-4) : '0000';
-            const groupKey = `${rawName.toLowerCase()}_${last4}`;
+            const phone = formatPhoneNumberForWa(o.buyerPhone || o.phone || '');
+            const key = `${rawName.toLowerCase()}|${phone}`;
 
-            if (!userTotals[groupKey]) {
-                userTotals[groupKey] = {
+            if (!buyerMap[key]) {
+                buyerMap[key] = {
                     name: rawName,
-                    last4: last4,
+                    phone: phone,
+                    totalSpend: 0,
+                    totalPacks: 0,
                     totalEggs: 0,
-                    totalSpent: 0,
                     orderCount: 0
                 };
             }
-            userTotals[groupKey].totalEggs += (o.totalEggs || 0);
-            userTotals[groupKey].totalSpent += (o.totalPrice || 0);
-            userTotals[groupKey].orderCount += 1;
+
+            buyerMap[key].totalSpend += (o.totalPrice || 0);
+            buyerMap[key].orderCount += 1;
+
+            let eggsInRow = 0;
+            if (o.unit === 'pack') {
+                eggsInRow = (o.qty || 0) * 10;
+                buyerMap[key].totalPacks += (o.qty || 0);
+            } else {
+                eggsInRow = (o.qty || 0);
+            }
+            buyerMap[key].totalEggs += eggsInRow;
+            totalEggsSoldAll += eggsInRow;
         }
     });
 
-    const rankings = Object.keys(userTotals).map(key => {
-        const item = userTotals[key];
-        const uObj = registeredUsers.find(u => u.name && u.name.toLowerCase() === item.name.toLowerCase());
-        return {
-            name: item.name,
-            last4: item.last4,
-            avatar: uObj ? (uObj.avatar || '👤') : '👤',
-            totalEggs: item.totalEggs,
-            totalSpent: item.totalSpent,
-            orderCount: item.orderCount
-        };
-    }).sort((a, b) => {
-        // 1. Prioritas utama: Jumlah Butir (kombinasi pack + eceran)
-        if (b.totalEggs !== a.totalEggs) {
-            return b.totalEggs - a.totalEggs;
-        }
-        // 2. Prioritas kedua: Total nominal belanja (spending)
-        if (b.totalSpent !== a.totalSpent) {
-            return b.totalSpent - a.totalSpent;
-        }
-        // 3. Prioritas ketiga: Jumlah transaksi
-        return b.orderCount - a.orderCount;
+    const leaderboard = Object.values(buyerMap).sort((a, b) => {
+        if (b.totalSpend !== a.totalSpend) return b.totalSpend - a.totalSpend;
+        return b.totalEggs - a.totalEggs;
     });
 
-﻿    if (rankings.length === 0) {
-        container.innerHTML = '<div class="card-placeholder"><span>trophy</span><p>Belum ada transaksi lunas untuk ditampilkan di leaderboard.</p></div>';
+    // Update Header Summary Stats
+    const totalBuyersEl = document.getElementById('lb-stat-total-buyers');
+    const totalEggsEl = document.getElementById('lb-stat-total-eggs');
+    const topBuyerEl = document.getElementById('lb-stat-top-buyer');
+
+    if (totalBuyersEl) totalBuyersEl.textContent = leaderboard.length;
+    if (totalEggsEl) totalEggsEl.textContent = totalEggsSoldAll.toLocaleString('id-ID') + ' Btr';
+    if (topBuyerEl) topBuyerEl.textContent = leaderboard.length > 0 ? leaderboard[0].name : '-';
+
+    const podiumContainer = document.getElementById('leaderboard-podium-container');
+    const listContainer = document.getElementById('leaderboard-ranking-list');
+
+    if (!listContainer) return;
+
+    if (leaderboard.length === 0) {
+        if (podiumContainer) podiumContainer.innerHTML = '';
+        listContainer.innerHTML = `
+            <div class="card-placeholder" style="margin-top: 6px; text-align: center; padding: 24px 16px;">
+                <span class="placeholder-icon" style="font-size: 2.2rem; display: block; margin-bottom: 8px;">🏆</span>
+                <strong style="color: var(--text-main); font-size: 0.95rem; display: block; margin-bottom: 4px;">Belum Ada Data Peringkat</strong>
+                <p style="font-size: 0.78rem; color: var(--text-muted); margin-bottom: 12px;">Selesaikan pesanan telur pertama Anda di Toko untuk masuk ke Papan Peringkat!</p>
+                <button type="button" class="btn btn-ranch" style="font-size: 0.8rem; padding: 6px 16px;" onclick="navigateTo('toko')">🛒 Belanja Telur Sekarang</button>
+            </div>
+        `;
         return;
     }
-    var lBadges = ['first','second','third'];
-    var lLabels = ['Top 1','Top 2','Top 3'];
-    container.innerHTML = rankings.map(function(item, idx) {
-        var isTop3 = idx < 3;
-        var bgS = isTop3 ? 'background: rgba(245,158,11,0.12); border: 1.5px solid rgba(245,158,11,0.3);' : 'background: var(--bg-card-subtle); border: 1px solid var(--border-color);';
-        var be = lBadges[idx] || ('#' + (idx+1));
-        var bl = lLabels[idx] || ('#' + (idx+1));
-        var mn = currentRole === 'visitor' ? anonymizeBuyerName(item.name) : item.name;
-        var dn = mn + ' (***' + item.last4 + ')';
-        return '<div style="' + bgS + ' border-radius:10px;padding:10px 12px;display:flex;align-items:center;justify-content:space-between;">'
-            + '<div style="display:flex;align-items:center;gap:10px;min-width:0;">'
-            + '<div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0;width:36px;">'
-            + '<span>' + be + '</span><span style="font-size:0.6rem;font-weight:800;color:var(--ranch-amber);">' + bl + '</span>'
-            + '</div>'
-            + '<span>' + item.avatar + '</span>'
-            + '<div style="min-width:0;"><strong style="display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + dn + '</strong>'
-            + '<span style="font-size:0.67rem;color:var(--text-muted);">' + item.orderCount + ' Transaksi Lunas</span></div></div>'
-            + '<div style="text-align:right;flex-shrink:0;margin-left:6px;">'
-            + '<strong style="color:var(--ranch-green);display:block;">' + item.totalEggs + ' Butir</strong>'
-            + '<span style="font-size:0.67rem;color:var(--ranch-amber);font-weight:700;">Rp ' + item.totalSpent.toLocaleString('id-ID') + '</span>'
-            + '</div></div>';
+
+    // Helper for buyer tier badge
+    function getBuyerBadge(spend, eggs) {
+        if (spend >= 500000 || eggs >= 150) {
+            return { label: '👑 Sultan Telur', color: '#f59e0b', bg: 'rgba(245,158,11,0.15)', border: 'rgba(245,158,11,0.3)' };
+        } else if (spend >= 200000 || eggs >= 80) {
+            return { label: '🥇 Juragan Telur', color: '#eab308', bg: 'rgba(234,179,8,0.15)', border: 'rgba(234,179,8,0.3)' };
+        } else if (spend >= 100000 || eggs >= 40) {
+            return { label: '🥈 Pelanggan Setia', color: '#94a3b8', bg: 'rgba(148,163,184,0.15)', border: 'rgba(148,163,184,0.3)' };
+        }
+        return { label: '🥉 Sahabat Huma', color: '#b45309', bg: 'rgba(180,83,9,0.15)', border: 'rgba(180,83,9,0.3)' };
+    }
+
+    // 1. RENDER TOP 3 PODIUM
+    if (podiumContainer) {
+        const top3 = leaderboard.slice(0, 3);
+        // Order for podium display: [ #2 (Left), #1 (Center/Tall), #3 (Right) ]
+        let displayOrder = [];
+        if (top3.length === 1) displayOrder = [top3[0]];
+        else if (top3.length === 2) displayOrder = [top3[1], top3[0]];
+        else displayOrder = [top3[1], top3[0], top3[2]];
+
+        podiumContainer.innerHTML = `
+            <div style="display: flex; justify-content: center; align-items: flex-end; gap: 8px; margin-top: 8px; margin-bottom: 4px;">
+                ${displayOrder.map(b => {
+                    const rankIdx = leaderboard.indexOf(b) + 1;
+                    const isFirst = rankIdx === 1;
+                    const isSecond = rankIdx === 2;
+                    const isThird = rankIdx === 3;
+
+                    const medalIcon = isFirst ? '🥇' : (isSecond ? '🥈' : '🥉');
+                    const borderColor = isFirst ? '#f59e0b' : (isSecond ? '#94a3b8' : '#b45309');
+                    const cardBg = isFirst ? 'linear-gradient(180deg, rgba(245,158,11,0.2) 0%, rgba(20,20,20,0.85) 100%)' : 'var(--bg-card-subtle)';
+                    const cardHeight = isFirst ? '145px' : (isSecond ? '130px' : '120px');
+                    const badge = getBuyerBadge(b.totalSpend, b.totalEggs);
+
+                    return `
+                        <div style="flex: 1; min-width: 90px; max-width: 120px; background: ${cardBg}; border: 1px solid ${borderColor}; border-radius: 12px; padding: 10px 6px; text-align: center; display: flex; flex-direction: column; justify-content: space-between; height: ${cardHeight}; box-shadow: 0 4px 12px rgba(0,0,0,0.3); position: relative;">
+                            <div>
+                                <div style="font-size: 1.3rem; line-height: 1; margin-bottom: 2px;">${medalIcon}</div>
+                                <strong style="font-size: 0.78rem; color: var(--text-main); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${b.name}</strong>
+                                <span style="font-size: 0.62rem; color: ${borderColor}; font-weight: 700; display: block; margin-top: 1px;">${badge.label}</span>
+                            </div>
+                            <div style="border-top: 1px dashed ${borderColor}; padding-top: 4px; margin-top: 4px;">
+                                <strong style="font-size: 0.75rem; color: var(--ranch-amber); display: block;">Rp ${b.totalSpend.toLocaleString('id-ID')}</strong>
+                                <span style="font-size: 0.62rem; color: var(--text-muted);">${b.totalEggs} Btr (${b.orderCount}x)</span>
+                            </div>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        `;
+    }
+
+    // 2. RENDER FULL RANKED LIST
+    listContainer.innerHTML = leaderboard.map((b, idx) => {
+        const rankNum = idx + 1;
+        const badge = getBuyerBadge(b.totalSpend, b.totalEggs);
+        const rankColor = rankNum === 1 ? '#f59e0b' : (rankNum === 2 ? '#94a3b8' : (rankNum === 3 ? '#b45309' : 'var(--text-muted)'));
+        const phoneFormatted = b.phone ? (b.phone.substring(0, 5) + '****' + b.phone.substring(b.phone.length - 2)) : '';
+
+        return `
+            <div style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 12px;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span style="font-size: 0.85rem; font-weight: 900; color: ${rankColor}; width: 26px; height: 26px; background: var(--bg-card); border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 1px solid ${rankColor}; flex-shrink: 0;">#${rankNum}</span>
+                    <div>
+                        <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                            <strong style="font-size: 0.82rem; color: var(--text-main);">${b.name}</strong>
+                            <span style="font-size: 0.62rem; background: ${badge.bg}; color: ${badge.color}; padding: 1px 6px; border-radius: 4px; border: 1px solid ${badge.border}; font-weight: 700;">${badge.label}</span>
+                        </div>
+                        <span style="font-size: 0.68rem; color: var(--text-muted); display: block; margin-top: 2px;">📱 ${phoneFormatted || 'Pelanggan'} • 🛒 ${b.orderCount} Transaksi Pesanan</span>
+                    </div>
+                </div>
+                <div style="text-align: right; flex-shrink: 0;">
+                    <strong style="font-size: 0.85rem; color: var(--ranch-amber);">Rp ${b.totalSpend.toLocaleString('id-ID')}</strong>
+                    <span style="font-size: 0.68rem; color: var(--text-muted); display: block;">🥚 ${b.totalEggs} Butir</span>
+                </div>
+            </div>
+        `;
     }).join('');
 }
 
-async function handleUpdateBankSubmit(e) {
-    e.preventDefault();
-    var bankName = document.getElementById('setting-bank-name').value.trim();
-    var bankNumber = document.getElementById('setting-bank-number').value.trim();
-    var bankOwner = document.getElementById('setting-bank-owner').value.trim();
-    if (!bankName || !bankNumber || !bankOwner) {
-        return showNotificationModal('Lengkapi Data Bank', 'Nama bank, nomor rekening, dan atas nama wajib diisi.', 'warn', 'error');
-    }
-    var submitBtn = e.target.querySelector('[type=submit]');
-    setButtonLoading(submitBtn, true);
-    try {
-        var res = await fetch('/api/settings/bank', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: JSON.stringify({ bank_name: bankName, bank_number: bankNumber, bank_owner: bankOwner }) });
-        if (!res.ok) throw new Error('Gagal menyimpan ke server.');
-        localStorage.setItem('huma_farm_bank_name', bankName);
-        localStorage.setItem('huma_farm_bank_number', bankNumber);
-        localStorage.setItem('huma_farm_bank_owner', bankOwner);
-        var b1 = document.getElementById('pay-bsi-number');
-        var b2 = document.getElementById('pay-bsi-owner');
-        var b3 = document.getElementById('pay-bsi-bank-name');
-        if (b1) b1.textContent = bankNumber;
-        if (b2) b2.textContent = bankOwner;
-        if (b3) b3.textContent = bankName;
-        showNotificationModal('Data Bank Disimpan!', 'Rekening ' + bankName + ' berhasil disimpan ke server.', 'bank', 'success');
-    } catch (err) {
-        showNotificationModal('Gagal Menyimpan', err.message || 'Gagal menyimpan data bank.', 'err', 'error');
-    } finally {
-        setButtonLoading(submitBtn, false);
-    }
-}
-
-function editUserOrderRecord(orderId) {
-    var orders = JSON.parse(localStorage.getItem('huma_farm_orders') || '[]');
-    var order = orders.find(function(o) { return o.id === orderId; });
-    if (!order) return;
-    document.getElementById('edit-order-id-hidden').value = orderId;
-    var buyerInput = document.getElementById('edit-order-buyer');
-    var phoneInput = document.getElementById('edit-order-phone');
-    if (buyerInput) buyerInput.value = order.buyerName || '';
-    if (phoneInput) phoneInput.value = order.buyerPhone || '';
-    var productLabel = document.getElementById('edit-order-product-label');
-    var qtyInput = document.getElementById('edit-order-qty');
-    var catLbl = order.category === 'negeri' ? 'Telur Negeri' : 'Telur Kampung';
-    var unitLbl = order.unit === 'pack' ? 'Pack (isi 10)' : 'Butir';
-    if (productLabel) productLabel.textContent = catLbl + ' (' + unitLbl + ')';
-    if (qtyInput) qtyInput.value = order.qty || 1;
-    var timestampInput = document.getElementById('edit-order-timestamp');
-    var timestampHint = document.getElementById('edit-timestamp-hint');
-    var dateObj = order.createdAt ? new Date(order.createdAt) : new Date();
-    if (isNaN(dateObj.getTime())) dateObj = new Date();
-    var tzoffset = dateObj.getTimezoneOffset() * 60000;
-    var localISOTime = (new Date(dateObj - tzoffset)).toISOString().slice(0, 16);
-    if (timestampInput) timestampInput.value = localISOTime;
-    var statusSelect = document.getElementById('edit-order-payment-status');
-    if (statusSelect) statusSelect.value = order.paymentStatus || 'Menunggu Konfirmasi';
-    var statusRow = document.getElementById('edit-order-status-row');
-    if (currentRole === 'admin') {
-        if (buyerInput) { buyerInput.readOnly = false; buyerInput.style.opacity = '1'; }
-        if (phoneInput) { phoneInput.readOnly = false; phoneInput.style.opacity = '1'; }
-        if (timestampInput) { timestampInput.readOnly = false; timestampInput.style.opacity = '1'; }
-        if (statusSelect) { statusSelect.disabled = false; }
-        if (statusRow) statusRow.style.display = 'block';
-        if (timestampHint) timestampHint.textContent = 'Admin bebas merubah tanggal dan waktu transaksi.';
-    } else {
-        if (buyerInput) { buyerInput.readOnly = true; buyerInput.style.opacity = '0.8'; }
-        if (phoneInput) { phoneInput.readOnly = true; phoneInput.style.opacity = '0.8'; }
-        if (timestampInput) { timestampInput.readOnly = true; timestampInput.style.opacity = '0.8'; }
-        if (statusSelect) { statusSelect.disabled = true; }
-        if (statusRow) statusRow.style.display = 'none';
-        if (timestampHint) timestampHint.textContent = 'Waktu terkunci untuk hari ini.';
-        var nowOffset = new Date().getTimezoneOffset() * 60000;
-        var nowLocal = (new Date(new Date() - nowOffset)).toISOString().slice(0, 16);
-        if (timestampInput) timestampInput.value = nowLocal;
-    }
-    var modal = document.getElementById('modal-edit-order');
-    if (modal) modal.classList.add('active');
-}
-
-function closeEditOrderModal() {
-    var modal = document.getElementById('modal-edit-order');
-    if (modal) modal.classList.remove('active');
-    qtyInput.value = curr;
-}
-
-async function handleSaveEditOrderSubmit(e) {
-    e.preventDefault();
-    const orderId = document.getElementById('edit-order-id-hidden').value;
-    const buyerName = document.getElementById('edit-order-buyer').value.trim();
-    const buyerPhone = document.getElementById('edit-order-phone').value.trim();
-    const qty = parseInt(document.getElementById('edit-order-qty').value) || 1;
-    const datetimeVal = document.getElementById('edit-order-timestamp').value;
-    const paymentStatus = document.getElementById('edit-order-payment-status').value;
-
-    showNotificationModal('Sedang Menyimpan...', 'Mengirim perubahan pesanan ke server...', '☁️', 'info');
-
-    try {
-        const payload = {
-            buyer_name: buyerName,
-            buyer_phone: buyerPhone || '',
-            qty: qty
-        };
-
-        if (currentRole === 'admin') {
-            payload.payment_status = paymentStatus;
-            if (datetimeVal) {
-                payload.created_at = new Date(datetimeVal).toISOString();
-            }
-        }
-
-        await apiRequest(`/orders/${orderId}`, 'PUT', payload);
-        await fetchCloudData();
-
-        closeEditOrderModal();
-        renderTokoOrdersData();
-        renderLeaderboardData();
-        updateDashboardData();
-
-        showNotificationModal('Perubahan Disimpan!', `Pesanan ${orderId} berhasil diperbarui.`, '✏️', 'success');
-
-    } catch (err) {
-        console.error('API save edit order error:', err);
-        showNotificationModal('Gagal Menyimpan', 'Gagal menyimpan perubahan pesanan ke server.', '❌', 'error');
-    }
-}
