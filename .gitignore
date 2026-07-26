@@ -22,4 +22,5 @@ yarn-error.log
 /.vscode
 /.zed
 /backups
+/_backups
 /public/uploads
