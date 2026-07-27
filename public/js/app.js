@@ -704,6 +704,9 @@ function updateRoleVisibility() {
         const dashCharts = document.getElementById('dash-charts-section');
         if (dashCharts) dashCharts.style.display = 'block';
 
+        const btnEditEggTrooper = document.getElementById('btn-edit-egg-trooper');
+        if (btnEditEggTrooper) btnEditEggTrooper.style.display = 'inline-block';
+
         if (settingsBtn) settingsBtn.style.display = 'none';
         if (logoutBtn) logoutBtn.style.display = 'inline-flex';
         if (tokoPricingBtn) tokoPricingBtn.style.display = 'inline-flex';
@@ -1551,17 +1554,7 @@ function openPaymentModal(orderId, buyerName, buyerPhone, orderDescArr, grandTot
     if (modalPay) modalPay.classList.add('active');
 }
 
-function getBaseOrderId(orderId) {
-    if (!orderId) return '';
-    const str = String(orderId).trim();
-    if (str.includes('-')) {
-        const parts = str.split('-');
-        if (parts.length > 2) {
-            return parts.slice(0, 2).join('-');
-        }
-    }
-    return str;
-}
+
 
 function openReceiptModalFromHistory(orderId) {
     const orders = JSON.parse(localStorage.getItem('huma_farm_orders') || '[]');
@@ -4398,11 +4391,115 @@ function renderKeuanganData() {
     const kpiExp = document.getElementById('kpi-expense-val');
     const kpiBal = document.getElementById('kpi-balance-val');
     const kpiCust = document.getElementById('kpi-customers-val');
+    const kpiOrdersCount = document.getElementById('kpi-orders-count-val');
+    const kpiExpensesCount = document.getElementById('kpi-expenses-count-val');
 
     if (kpiInc) kpiInc.textContent = 'Rp ' + totalIncome.toLocaleString('id-ID');
     if (kpiExp) kpiExp.textContent = 'Rp ' + totalExpense.toLocaleString('id-ID');
     if (kpiBal) kpiBal.textContent = 'Rp ' + netBalance.toLocaleString('id-ID');
     if (kpiCust) kpiCust.textContent = customerSet.size;
+
+    // Calculate Egg Distribution Stats (Negeri vs Kampung)
+    const panenHistory = JSON.parse(localStorage.getItem('huma_farm_panen_history') || '[]');
+    let distNegeriPanen = 0, distNegeriJual = 0, distNegeriKonsumsi = 0, distNegeriSedekah = 0;
+    let distKampungPanen = 0, distKampungJual = 0, distKampungKonsumsi = 0, distKampungSedekah = 0;
+
+    panenHistory.forEach(item => {
+        const neg = parseInt(item.negeri || 0);
+        const kam = parseInt(item.kampung || 0);
+        if (item.type === 'add') {
+            distNegeriPanen += neg;
+            distKampungPanen += kam;
+        } else if (item.type === 'sub') {
+            const reason = (item.reason || '').toLowerCase();
+            if (reason.includes('sedekah') || reason.includes('zakat') || reason.includes('hadiah') || reason.includes('bonus')) {
+                distNegeriSedekah += neg;
+                distKampungSedekah += kam;
+            } else {
+                distNegeriKonsumsi += neg;
+                distKampungKonsumsi += kam;
+            }
+        }
+    });
+
+    orders.forEach(o => {
+        if (o.paymentStatus === 'Lunas') {
+            const eggs = parseInt(o.totalEggs || 0) || ((o.unit === 'pack' ? (o.qty * 10) : o.qty) || 0);
+            const isReward = o.isReward || parseFloat(o.totalPrice || 0) === 0 || (o.category && o.category.includes('bonus'));
+            
+            if (o.category === 'negeri') {
+                if (isReward) {
+                    distNegeriSedekah += eggs;
+                } else {
+                    distNegeriJual += eggs;
+                }
+            } else if (o.category === 'kampung') {
+                if (isReward) {
+                    distKampungSedekah += eggs;
+                } else {
+                    distKampungJual += eggs;
+                }
+            }
+        }
+    });
+
+    const elNPanen = document.getElementById('dist-negeri-panen');
+    const elNJual = document.getElementById('dist-negeri-jual');
+    const elNKonsumsi = document.getElementById('dist-negeri-konsumsi');
+    const elNSedekah = document.getElementById('dist-negeri-sedekah');
+
+    const elKPanen = document.getElementById('dist-kampung-panen');
+    const elKJual = document.getElementById('dist-kampung-jual');
+    const elKKonsumsi = document.getElementById('dist-kampung-konsumsi');
+    const elKSedekah = document.getElementById('dist-kampung-sedekah');
+
+    if (elNPanen) elNPanen.textContent = distNegeriPanen + ' Butir';
+    if (elNJual) elNJual.textContent = distNegeriJual + ' Butir';
+    if (elNKonsumsi) elNKonsumsi.textContent = distNegeriKonsumsi + ' Butir';
+    if (elNSedekah) elNSedekah.textContent = distNegeriSedekah + ' Butir';
+
+    if (elKPanen) elKPanen.textContent = distKampungPanen + ' Butir';
+    if (elKJual) elKJual.textContent = distKampungJual + ' Butir';
+    if (elKKonsumsi) elKKonsumsi.textContent = distKampungKonsumsi + ' Butir';
+    if (elKSedekah) elKSedekah.textContent = distKampungSedekah + ' Butir';
+
+    // Update Dashboard Stok Ready (Total Butir, Pack, Eceran)
+    const activeStock = typeof getCalculatedReadyStock === 'function' ? getCalculatedReadyStock() : { negeri: 0, kampung: 0 };
+    
+    const dashStokNegeri = document.getElementById('dash-stok-negeri');
+    const dashStokNegeriPack = document.getElementById('dash-stok-negeri-pack');
+    const dashStokNegeriEceran = document.getElementById('dash-stok-negeri-eceran');
+
+    const dashStokKampung = document.getElementById('dash-stok-kampung');
+    const dashStokKampungPack = document.getElementById('dash-stok-kampung-pack');
+    const dashStokKampungEceran = document.getElementById('dash-stok-kampung-eceran');
+
+    if (dashStokNegeri) dashStokNegeri.textContent = activeStock.negeri + ' Butir';
+    if (dashStokNegeriPack) dashStokNegeriPack.textContent = Math.floor(activeStock.negeri / 10) + ' Pack (Isi 10)';
+    if (dashStokNegeriEceran) dashStokNegeriEceran.textContent = (activeStock.negeri % 10) + ' Butir Eceran';
+
+    if (dashStokKampung) dashStokKampung.textContent = activeStock.kampung + ' Butir';
+    if (dashStokKampungPack) dashStokKampungPack.textContent = Math.floor(activeStock.kampung / 10) + ' Pack (Isi 10)';
+    if (dashStokKampungEceran) dashStokKampungEceran.textContent = (activeStock.kampung % 10) + ' Butir Eceran';
+
+    // Update Sales Summary Box (Total Transaksi & Total Pelanggan berdasarkan riwayat)
+    const uniqueOrdersSet = new Set();
+    orders.forEach(o => {
+        const baseId = typeof getBaseOrderId === 'function' ? getBaseOrderId(o.id) : o.id;
+        if (baseId) uniqueOrdersSet.add(baseId);
+    });
+
+    const elTotalTrans = document.getElementById('dash-total-transactions-val');
+    const elTotalCust = document.getElementById('dash-total-customers-val');
+
+    if (elTotalTrans) elTotalTrans.textContent = uniqueOrdersSet.size + ' Transaksi';
+    if (elTotalCust) elTotalCust.textContent = customerSet.size + ' Pelanggan';
+
+    // Render EggFlow Charts (1 Bulan & 1 Tahun)
+    renderDashboardCharts();
+
+    // Render Egg Trooper Population Data
+    renderEggTrooperData();
 
     // Render Transactions History (Combined Pemasukan & Pengeluaran)
     const container = document.getElementById('wallet-transaction-list');
@@ -4938,5 +5035,430 @@ function renderLeaderboardData() {
             </div>
         `;
     }).join('');
+}
+
+/* ==========================================================================
+   EGGFLOW CHARTS (1 BULAN & 1 TAHUN)
+   ========================================================================== */
+let eggFlowMonthlyChartInstance = null;
+let eggFlowYearlyChartInstance = null;
+
+function renderDashboardCharts() {
+    const chartsSection = document.getElementById('dash-charts-section');
+    if (!chartsSection) return;
+    
+    chartsSection.style.display = 'block';
+
+    const panenHistory = JSON.parse(localStorage.getItem('huma_farm_panen_history') || '[]');
+    const orders = JSON.parse(localStorage.getItem('huma_farm_orders') || '[]');
+
+    const today = new Date();
+    const currentYear = today.getFullYear();
+    const currentMonth = today.getMonth(); // 0-indexed (6 = July)
+    const monthNamesIndo = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+    const monthNamesShort = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agt', 'Sep', 'Okt', 'Nov', 'Des'];
+
+    // Update Header Titles dynamically
+    const elMonthlyTitle = document.getElementById('chart-monthly-title');
+    const elYearlyTitle = document.getElementById('chart-yearly-title');
+    if (elMonthlyTitle) elMonthlyTitle.textContent = `📈 EggFlow Bulanan (Bulan ${monthNamesIndo[currentMonth]} ${currentYear})`;
+    if (elYearlyTitle) elYearlyTitle.textContent = `📊 EggFlow Tahunan (Tahun ${currentYear})`;
+
+    // --- 1. EGGFLOW BULAN BERJALAN (1 s/d Hari Terakhir di Bulan Ini) ---
+    const totalDaysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+    const monthlyDays = [];
+    const monthlyPanenMap = {};
+    const monthlyJualMap = {};
+    const monthlyKonsumsiMap = {};
+
+    for (let day = 1; day <= totalDaysInMonth; day++) {
+        const dayStr = String(day).padStart(2, '0');
+        const monthStr = String(currentMonth + 1).padStart(2, '0');
+        const isoDate = `${currentYear}-${monthStr}-${dayStr}`;
+        
+        monthlyDays.push(isoDate);
+        monthlyPanenMap[isoDate] = 0;
+        monthlyJualMap[isoDate] = 0;
+        monthlyKonsumsiMap[isoDate] = 0;
+    }
+
+    panenHistory.forEach(item => {
+        const itemDate = (item.date || '').split('T')[0];
+        if (monthlyPanenMap[itemDate] !== undefined) {
+            const totalEggs = (parseInt(item.negeri || 0) + parseInt(item.kampung || 0));
+            if (item.type === 'add') {
+                monthlyPanenMap[itemDate] += totalEggs;
+            } else if (item.type === 'sub') {
+                monthlyKonsumsiMap[itemDate] += totalEggs;
+            }
+        }
+    });
+
+    orders.forEach(o => {
+        if (o.paymentStatus === 'Lunas') {
+            const oDate = (o.createdAt ? o.createdAt.split('T')[0] : (o.date || '')).split('T')[0];
+            if (monthlyJualMap[oDate] !== undefined) {
+                const eggs = parseInt(o.totalEggs || 0) || ((o.unit === 'pack' ? (o.qty * 10) : o.qty) || 0);
+                const isReward = o.isReward || parseFloat(o.totalPrice || 0) === 0 || (o.category && o.category.includes('bonus'));
+                if (isReward) {
+                    monthlyKonsumsiMap[oDate] += eggs;
+                } else {
+                    monthlyJualMap[oDate] += eggs;
+                }
+            }
+        }
+    });
+
+    const monthlyLabels = monthlyDays.map(dStr => {
+        const p = dStr.split('-');
+        return `${parseInt(p[2])}/${parseInt(p[1])}`;
+    });
+    const monthlyPanenData = monthlyDays.map(d => monthlyPanenMap[d] || 0);
+    const monthlyJualData = monthlyDays.map(d => monthlyJualMap[d] || 0);
+    const monthlyKonsumsiData = monthlyDays.map(d => monthlyKonsumsiMap[d] || 0);
+
+    const ctxMonthly = document.getElementById('chartEggFlowMonthly');
+    if (ctxMonthly && typeof Chart !== 'undefined') {
+        if (eggFlowMonthlyChartInstance) {
+            eggFlowMonthlyChartInstance.destroy();
+        }
+        eggFlowMonthlyChartInstance = new Chart(ctxMonthly, {
+            type: 'line',
+            data: {
+                labels: monthlyLabels,
+                datasets: [
+                    {
+                        label: '🥚 Terpanen',
+                        data: monthlyPanenData,
+                        borderColor: '#f59e0b',
+                        backgroundColor: 'rgba(245, 158, 11, 0.08)',
+                        fill: true,
+                        tension: 0.35,
+                        borderWidth: 2.5,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
+                        pointHoverBackgroundColor: '#ffffff',
+                        pointHoverBorderColor: '#f59e0b',
+                        pointHoverBorderWidth: 2
+                    },
+                    {
+                        label: '📦 Terjual',
+                        data: monthlyJualData,
+                        borderColor: '#10b981',
+                        backgroundColor: 'rgba(16, 185, 129, 0.08)',
+                        fill: true,
+                        tension: 0.35,
+                        borderWidth: 2.5,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
+                        pointHoverBackgroundColor: '#ffffff',
+                        pointHoverBorderColor: '#10b981',
+                        pointHoverBorderWidth: 2
+                    },
+                    {
+                        label: '🍳 Terkonsumsi',
+                        data: monthlyKonsumsiData,
+                        borderColor: '#ef4444',
+                        backgroundColor: 'rgba(239, 68, 68, 0.08)',
+                        fill: true,
+                        tension: 0.35,
+                        borderWidth: 2.5,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
+                        pointHoverBackgroundColor: '#ffffff',
+                        pointHoverBorderColor: '#ef4444',
+                        pointHoverBorderWidth: 2
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: {
+                    mode: 'index',
+                    intersect: false
+                },
+                plugins: {
+                    legend: {
+                        position: 'top',
+                        labels: {
+                            color: '#cbd5e1',
+                            usePointStyle: true,
+                            pointStyle: 'circle',
+                            font: { size: 10, weight: '700' },
+                            padding: 12
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(15, 23, 42, 0.92)',
+                        titleColor: '#f8fafc',
+                        bodyColor: '#cbd5e1',
+                        borderColor: 'rgba(255, 255, 255, 0.12)',
+                        borderWidth: 1,
+                        padding: 10,
+                        usePointStyle: true,
+                        boxPadding: 4
+                    }
+                },
+                scales: {
+                    x: {
+                        ticks: {
+                            color: '#94a3b8',
+                            font: { size: 9.5, weight: '600' },
+                            maxRotation: 0,
+                            autoSkip: true,
+                            maxTicksLimit: 9
+                        },
+                        grid: { display: false }
+                    },
+                    y: {
+                        ticks: {
+                            color: '#94a3b8',
+                            font: { size: 9.5 },
+                            precision: 0
+                        },
+                        grid: {
+                            color: 'rgba(255, 255, 255, 0.06)',
+                            drawBorder: false
+                        },
+                        beginAtZero: true
+                    }
+                }
+            }
+        });
+    }
+
+    // --- 2. EGGFLOW TAHUN BERJALAN (Januari s/d Desember di Tahun Ini) ---
+    const yearlyMonths = [];
+    const yearlyPanenMap = {};
+    const yearlyJualMap = {};
+    const yearlyKonsumsiMap = {};
+
+    for (let m = 0; m < 12; m++) {
+        const monthStr = String(m + 1).padStart(2, '0');
+        const yearMonth = `${currentYear}-${monthStr}`;
+        yearlyMonths.push(yearMonth);
+        yearlyPanenMap[yearMonth] = 0;
+        yearlyJualMap[yearMonth] = 0;
+        yearlyKonsumsiMap[yearMonth] = 0;
+    }
+
+    panenHistory.forEach(item => {
+        const itemDate = (item.date || '').split('T')[0];
+        const ym = itemDate.substring(0, 7);
+        if (yearlyPanenMap[ym] !== undefined) {
+            const totalEggs = (parseInt(item.negeri || 0) + parseInt(item.kampung || 0));
+            if (item.type === 'add') {
+                yearlyPanenMap[ym] += totalEggs;
+            } else if (item.type === 'sub') {
+                yearlyKonsumsiMap[ym] += totalEggs;
+            }
+        }
+    });
+
+    orders.forEach(o => {
+        if (o.paymentStatus === 'Lunas') {
+            const oDate = (o.createdAt ? o.createdAt.split('T')[0] : (o.date || '')).split('T')[0];
+            const ym = oDate.substring(0, 7);
+            if (yearlyJualMap[ym] !== undefined) {
+                const eggs = parseInt(o.totalEggs || 0) || ((o.unit === 'pack' ? (o.qty * 10) : o.qty) || 0);
+                const isReward = o.isReward || parseFloat(o.totalPrice || 0) === 0 || (o.category && o.category.includes('bonus'));
+                if (isReward) {
+                    yearlyKonsumsiMap[ym] += eggs;
+                } else {
+                    yearlyJualMap[ym] += eggs;
+                }
+            }
+        }
+    });
+
+    const yearlyLabels = yearlyMonths.map(ymStr => {
+        const parts = ymStr.split('-');
+        const mIdx = parseInt(parts[1]) - 1;
+        return `${monthNamesShort[mIdx]} '${parts[0].substring(2)}`;
+    });
+
+    const yearlyPanenData = yearlyMonths.map(ym => yearlyPanenMap[ym] || 0);
+    const yearlyJualData = yearlyMonths.map(ym => yearlyJualMap[ym] || 0);
+    const yearlyKonsumsiData = yearlyMonths.map(ym => yearlyKonsumsiMap[ym] || 0);
+
+    const ctxYearly = document.getElementById('chartEggFlowYearly');
+    if (ctxYearly && typeof Chart !== 'undefined') {
+        if (eggFlowYearlyChartInstance) {
+            eggFlowYearlyChartInstance.destroy();
+        }
+        eggFlowYearlyChartInstance = new Chart(ctxYearly, {
+            type: 'bar',
+            data: {
+                labels: yearlyLabels,
+                datasets: [
+                    {
+                        label: '🥚 Terpanen',
+                        data: yearlyPanenData,
+                        backgroundColor: '#f59e0b',
+                        borderRadius: 6,
+                        borderSkipped: false
+                    },
+                    {
+                        label: '📦 Terjual',
+                        data: yearlyJualData,
+                        backgroundColor: '#10b981',
+                        borderRadius: 6,
+                        borderSkipped: false
+                    },
+                    {
+                        label: '🍳 Terkonsumsi',
+                        data: yearlyKonsumsiData,
+                        backgroundColor: '#ef4444',
+                        borderRadius: 6,
+                        borderSkipped: false
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                categoryPercentage: 0.7,
+                barPercentage: 0.85,
+                interaction: {
+                    mode: 'index',
+                    intersect: false
+                },
+                plugins: {
+                    legend: {
+                        position: 'top',
+                        labels: {
+                            color: '#cbd5e1',
+                            usePointStyle: true,
+                            pointStyle: 'rectRounded',
+                            font: { size: 10, weight: '700' },
+                            padding: 12
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(15, 23, 42, 0.92)',
+                        titleColor: '#f8fafc',
+                        bodyColor: '#cbd5e1',
+                        borderColor: 'rgba(255, 255, 255, 0.12)',
+                        borderWidth: 1,
+                        padding: 10,
+                        usePointStyle: true,
+                        boxPadding: 4
+                    }
+                },
+                scales: {
+                    x: {
+                        ticks: {
+                            color: '#94a3b8',
+                            font: { size: 9.5, weight: '600' },
+                            maxRotation: 0
+                        },
+                        grid: { display: false }
+                    },
+                    y: {
+                        ticks: {
+                            color: '#94a3b8',
+                            font: { size: 9.5 },
+                            precision: 0
+                        },
+                        grid: {
+                            color: 'rgba(255, 255, 255, 0.06)',
+                            drawBorder: false
+                        },
+                        beginAtZero: true
+                    }
+                }
+            }
+        });
+    }
+}
+
+/* ==========================================================================
+   EGG TROOPER (POPULASI AYAM) MANAGEMENT
+   ========================================================================== */
+function getEggTrooperData() {
+    const raw = localStorage.getItem('huma_farm_egg_trooper_data');
+    if (raw) {
+        try { return JSON.parse(raw); } catch (e) {}
+    }
+    return {
+        negeri: { betina: 0, jantan: 0 },
+        kampung: { betina: 0, jantan: 0 }
+    };
+}
+
+function renderEggTrooperData() {
+    const data = getEggTrooperData();
+    const btnEdit = document.getElementById('btn-edit-egg-trooper');
+    
+    if (btnEdit) {
+        btnEdit.style.display = (currentRole === 'admin') ? 'inline-block' : 'none';
+    }
+
+    const nBetina = document.getElementById('dash-negeri-betina-val');
+    const nJantan = document.getElementById('dash-negeri-jantan-val');
+    const kBetina = document.getElementById('dash-kampung-betina-val');
+    const kJantan = document.getElementById('dash-kampung-jantan-val');
+
+    if (nBetina) nBetina.textContent = (data.negeri ? data.negeri.betina : 0) + ' Ekor';
+    if (nJantan) nJantan.textContent = (data.negeri ? data.negeri.jantan : 0) + ' Ekor';
+    if (kBetina) kBetina.textContent = (data.kampung ? data.kampung.betina : 0) + ' Ekor';
+    if (kJantan) kJantan.textContent = (data.kampung ? data.kampung.jantan : 0) + ' Ekor';
+}
+
+function openEditEggTrooperModal() {
+    const data = getEggTrooperData();
+
+    const inNBetina = document.getElementById('input-negeri-betina');
+    const inNJantan = document.getElementById('input-negeri-jantan');
+    const inKBetina = document.getElementById('input-kampung-betina');
+    const inKJantan = document.getElementById('input-kampung-jantan');
+
+    if (inNBetina) inNBetina.value = (data.negeri && data.negeri.betina !== undefined) ? data.negeri.betina : 0;
+    if (inNJantan) inNJantan.value = (data.negeri && data.negeri.jantan !== undefined) ? data.negeri.jantan : 0;
+    if (inKBetina) inKBetina.value = (data.kampung && data.kampung.betina !== undefined) ? data.kampung.betina : 0;
+    if (inKJantan) inKJantan.value = (data.kampung && data.kampung.jantan !== undefined) ? data.kampung.jantan : 0;
+
+    const modal = document.getElementById('modal-edit-egg-trooper');
+    if (modal) {
+        modal.classList.add('active');
+        modal.style.display = 'flex';
+    }
+}
+
+function closeEditEggTrooperModal() {
+    const modal = document.getElementById('modal-edit-egg-trooper');
+    if (modal) {
+        modal.classList.remove('active');
+        modal.style.display = 'none';
+    }
+}
+
+function saveEggTrooperData(e) {
+    if (e) e.preventDefault();
+
+    const inNBetina = document.getElementById('input-negeri-betina');
+    const inNJantan = document.getElementById('input-negeri-jantan');
+    const inKBetina = document.getElementById('input-kampung-betina');
+    const inKJantan = document.getElementById('input-kampung-jantan');
+
+    const newData = {
+        negeri: {
+            betina: parseInt(inNBetina ? inNBetina.value : 0) || 0,
+            jantan: parseInt(inNJantan ? inNJantan.value : 0) || 0
+        },
+        kampung: {
+            betina: parseInt(inKBetina ? inKBetina.value : 0) || 0,
+            jantan: parseInt(inKJantan ? inKJantan.value : 0) || 0
+        }
+    };
+
+    localStorage.setItem('huma_farm_egg_trooper_data', JSON.stringify(newData));
+    renderEggTrooperData();
+    closeEditEggTrooperModal();
+
+    if (typeof showToast === 'function') {
+        showToast('🐔 Populasi Egg Trooper berhasil diperbarui!', 'success');
+    }
 }
 
