@@ -11,10 +11,9 @@
             "Segar, Bergizi, Langsung dari Ayam yang Bahagia."
         </p>
 
-        <!-- SOCIAL PROOF -->
+        <!-- TRUST BADGE -->
         <div class="hero-social-proof">
-            <span class="hero-stars">⭐⭐⭐⭐⭐</span>
-            <span class="hero-proof-text">4.9 · <strong>200+ keluarga</strong> sudah memesan</span>
+            <span class="hero-proof-text">❤️ <strong>Dipercaya untuk Keluarga Sehat & Bergizi</strong></span>
         </div>
 
         <!-- QUICK STATS PILLS -->
