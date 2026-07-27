@@ -5,7 +5,7 @@
             <h1 class="page-title" style="display: flex; align-items: center; gap: 8px;">
                 <span>🏆 Leaderboard Pembeli Setia</span>
             </h1>
-            <p class="page-subtitle">Papan peringkat pelanggan teratas Huma Farm berdasarkan total akumulasi pembelian telur lunas.</p>
+            <p class="page-subtitle">Papan peringkat pelanggan teratas Huma Farm berdasarkan total akumulasi jumlah telur.</p>
         </div>
     </div>
 

@@ -23,7 +23,7 @@
             </div>
 
             <!-- BARIS 2: TELUR KAMPUNG -->
-            <div style="background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; margin-bottom: 14px;">
+            <div style="background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; margin-bottom: 10px;">
                 <strong style="font-size: 0.84rem; color: var(--ranch-green); display: block; margin-bottom: 6px;">🥚 Harga Telur Kampung (Putih)</strong>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
                     <div>
@@ -37,9 +37,19 @@
                 </div>
             </div>
 
+            <!-- BARIS 3: MAKSIMAL KUOTA PRE-ORDER (PO) -->
+            <div style="background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; margin-bottom: 14px;">
+                <strong style="font-size: 0.84rem; color: var(--ranch-amber); display: block; margin-bottom: 3px;">📦 Kuota Maksimal Pre-Order (PO)</strong>
+                <p style="color: var(--text-muted); font-size: 0.72rem; margin-bottom: 6px;">Batas maksimal order PO aktif bersamaan sebelum pembeli baru harus menunggu kuota.</p>
+                <div>
+                    <label class="form-label">Maksimal Order PO Aktif:</label>
+                    <input type="number" id="pricing-max-po-quota" class="form-input" min="1" value="2" required placeholder="Contoh: 2">
+                </div>
+            </div>
+
             <div style="display: flex; gap: 8px; justify-content: flex-end;">
                 <button type="button" class="btn btn-outline" onclick="closeTokoPricingModal()">Batal</button>
-                <button type="submit" class="btn btn-ranch">💾 Simpan Harga Baru</button>
+                <button type="submit" class="btn btn-ranch">💾 Simpan Pengaturan</button>
             </div>
         </form>
     </div>

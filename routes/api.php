@@ -52,8 +52,9 @@ Route::middleware('admin.token')->group(function () {
     Route::put('/expenses/{id}', [ExpenseController::class, 'update']);
     Route::delete('/expenses/{id}', [ExpenseController::class, 'destroy']);
 
-    // Settings — prices, bank, qris
+    // Settings — prices, bank, qris, egg trooper
     Route::post('/settings/prices', [SettingController::class, 'savePrices']);
     Route::post('/settings/bank',   [SettingController::class, 'saveBank']);
     Route::post('/settings/qris',   [SettingController::class, 'saveQris']);
+    Route::post('/settings/egg-trooper', [SettingController::class, 'saveEggTrooper']);
 });

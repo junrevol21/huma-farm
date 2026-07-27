@@ -123,7 +123,8 @@ class SettingController extends Controller
             'bank_number' => $this->getSetting('bank_number', '7367004597'),
             'bank_owner' => $this->getSetting('bank_owner', 'Mela Mufida'),
             'qris_merchant' => $this->getSetting('qris_merchant', 'Huma Farm'),
-            'qris_image_url' => $this->normalizeQrisUrl($this->getSetting('qris_image_url', 'images/qris_huma_farm.png'))
+            'qris_image_url' => $this->normalizeQrisUrl($this->getSetting('qris_image_url', 'images/qris_huma_farm.png')),
+            'egg_trooper_data' => $this->getSetting('egg_trooper_data', '')
         ];
 
         return response()->json([
@@ -373,6 +374,24 @@ class SettingController extends Controller
                 'avatar' => $user->avatar,
                 'role' => $user->role
             ]
+        ]);
+    }
+
+    /**
+     * Save/update Egg Trooper chicken population data.
+     */
+    public function saveEggTrooper(Request $request)
+    {
+        $data = $request->input('egg_trooper_data');
+        if (is_array($data)) {
+            $data = json_encode($data);
+        }
+        $this->setSetting('egg_trooper_data', (string) $data);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Data Egg Trooper berhasil disimpan di server.',
+            'data' => $data
         ]);
     }
 }

@@ -105,7 +105,8 @@ const DEFAULT_PRICES = {
     negeriPack: 25000,
     negeriEgg: 2500,
     kampungPack: 35000,
-    kampungEgg: 3500
+    kampungEgg: 3500,
+    maxPoQuota: 2
 };
 
 // AUTOMATIC STOCK CALCULATION ENGINE (PANEN minus PENGURANGAN minus ORDER LUNAS)
@@ -348,6 +349,19 @@ async function fetchCloudData() {
                 }
                 const merchantLabel = document.getElementById('pay-qris-merchant');
                 if (merchantLabel) merchantLabel.textContent = `📱 SCAN QRIS (${res.settings.qris_merchant.toUpperCase()})`;
+
+                // 7. Sync Egg Trooper Data across all devices
+                if (res.settings.egg_trooper_data) {
+                    try {
+                        const parsedData = typeof res.settings.egg_trooper_data === 'string'
+                            ? JSON.parse(res.settings.egg_trooper_data)
+                            : res.settings.egg_trooper_data;
+                        if (parsedData && typeof parsedData === 'object') {
+                            localStorage.setItem('huma_farm_egg_trooper_data', JSON.stringify(parsedData));
+                            renderEggTrooperData();
+                        }
+                    } catch (e) {}
+                }
             }
 
             // Render all UI components
@@ -356,6 +370,7 @@ async function fetchCloudData() {
             renderLeaderboardData();
             renderTokoData();
             renderKeuanganData();
+            renderEggTrooperData();
             updateDashboardData();
         }
     } catch (e) {
@@ -1143,6 +1158,23 @@ function onOrderQtyInput(key, val) {
     refreshOrderStockStatus();
 }
 
+/* ==========================================================================
+   ACTIVE PRE-ORDER (PO) QUOTA MANAGEMENT ENGINE
+   ========================================================================== */
+function getActivePoCount() {
+    const orders = JSON.parse(localStorage.getItem('huma_farm_orders') || '[]');
+    const activePoSet = new Set();
+    orders.forEach(o => {
+        const isPO = (o.status === 'po') || (o.orderType === 'PO') || (o.isPO === true) || (o.payment_status === 'PO');
+        const isCancelledOrDone = (o.paymentStatus === 'Batal') || (o.payment_status === 'Batal') || (o.status === 'Selesai') || (o.paymentStatus === 'Selesai');
+        if (isPO && !isCancelledOrDone) {
+            const baseId = typeof getBaseOrderId === 'function' ? getBaseOrderId(o.id) : o.id;
+            activePoSet.add(baseId);
+        }
+    });
+    return activePoSet.size;
+}
+
 function refreshOrderStockStatus() {
     const btn = document.getElementById('order-submit-btn');
     const warn = document.getElementById('order-stock-warning');
@@ -1219,21 +1251,36 @@ function refreshOrderStockStatus() {
     const hasShortage = shortN > 0 || shortK > 0;
 
     if (hasShortage) {
+        const activePoCount = getActivePoCount();
+        const maxPoQuota = (prices && prices.maxPoQuota) ? prices.maxPoQuota : 2;
+        const isPoQuotaFull = activePoCount >= maxPoQuota;
+
         let msgs = [];
         if (shortN > 0) msgs.push(`Negeri kurang ${shortN} butir`);
         if (shortK > 0) msgs.push(`Kampung kurang ${shortK} butir`);
         if (warn) warn.style.display = 'flex';
-        if (warnText) warnText.textContent = '⚠️ Stok kurang (' + msgs.join(', ') + '). Silakan ajukan Pre-Order.';
-        if (btn) {
-            btn.disabled = false;
-            if (currentRole === 'admin') {
-                btn.innerHTML = '📥 Input Pesanan';
-                btn.classList.remove('btn-po');
-                btn.classList.add('btn-ranch');
-            } else {
-                btn.innerHTML = '📋 Ajukan PO via WhatsApp';
+
+        if (isPoQuotaFull && currentRole !== 'admin') {
+            if (warnText) warnText.textContent = `⛔ Kuota Pre-Order (PO) sedang penuh (${activePoCount}/${maxPoQuota} PO aktif). Silakan tunggu kuota PO kembali tersedia!`;
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = `⛔ Kuota PO Penuh (${activePoCount}/${maxPoQuota})`;
                 btn.classList.add('btn-po');
                 btn.classList.remove('btn-ranch');
+            }
+        } else {
+            if (warnText) warnText.textContent = '⚠️ Stok kurang (' + msgs.join(', ') + '). Silakan ajukan Pre-Order.';
+            if (btn) {
+                btn.disabled = false;
+                if (currentRole === 'admin') {
+                    btn.innerHTML = '📥 Input Pesanan';
+                    btn.classList.remove('btn-po');
+                    btn.classList.add('btn-ranch');
+                } else {
+                    btn.innerHTML = '📋 Ajukan PO via WhatsApp';
+                    btn.classList.add('btn-po');
+                    btn.classList.remove('btn-ranch');
+                }
             }
         }
     } else {
@@ -1401,6 +1448,28 @@ async function handleQuickUserOrderStep1Submit(e) {
     const buyerPhone = phoneInp ? phoneInp.value.trim() : '';
 
     const prices = getTokoPrices();
+
+    // Check Pre-Order (PO) Quota Limit
+    const activeStock = getCalculatedReadyStock();
+    const needNegeriEggs = (orderQtyNegeriPack * 10) + orderQtyNegeriEgg;
+    const needKampungEggs = (orderQtyKampungPack * 10) + orderQtyKampungEgg;
+    const shortN = Math.max(0, needNegeriEggs - activeStock.negeri);
+    const shortK = Math.max(0, needKampungEggs - activeStock.kampung);
+    const hasShortage = shortN > 0 || shortK > 0;
+
+    const activePoCount = getActivePoCount();
+    const maxPoQuota = prices.maxPoQuota || 2;
+
+    if (hasShortage && activePoCount >= maxPoQuota && currentRole !== 'admin') {
+        showNotificationModal(
+            '⛔ Kuota Pre-Order (PO) Penuh!',
+            `Mohon maaf, kuota order Pre-Order (PO) saat ini telah mencapai batas maksimal (${activePoCount}/${maxPoQuota} PO aktif).\n\nSilakan tunggu hingga transaksi PO yang ada selesai agar kuota PO kembali terbuka.`,
+            '⛔',
+            'warning'
+        );
+        return;
+    }
+
     let orderDescArr = [];
     let grandTotal = 0;
     let itemsToProcess = [];
@@ -2530,22 +2599,37 @@ function renderTokoOrdersData() {
                 ? `<svg width="12" height="15" viewBox="0 0 100 125" style="vertical-align: -2px; margin-right: 4px; display: inline-block;"><path d="M 50,5 C 22,5 5,45 5,75 C 5,102 25,120 50,120 C 75,120 95,102 95,75 C 95,45 78,5 50,5 Z" fill="#B06530"/><ellipse cx="38" cy="32" rx="14" ry="22" fill="#FFFFFF" opacity="0.25" transform="rotate(-18 38 32)"/></svg>`
                 : `<svg width="12" height="15" viewBox="0 0 100 125" style="vertical-align: -2px; margin-right: 4px; display: inline-block;"><path d="M 50,5 C 22,5 5,45 5,75 C 5,102 25,120 50,120 C 75,120 95,102 95,75 C 95,45 78,5 50,5 Z" fill="#FFFFFF" stroke="#94A3B8" stroke-width="5"/><ellipse cx="38" cy="32" rx="14" ry="22" fill="#FFFFFF" opacity="0.75" transform="rotate(-18 38 32)"/></svg>`;
 
+            const priceItemHTML = currentRole !== 'visitor'
+                ? `<strong style="color: var(--text-muted); font-size: 0.8rem;">Rp 0</strong>`
+                : '';
+
+            const subItemPriceHTML = currentRole !== 'visitor'
+                ? `<strong style="color: var(--ranch-amber); font-size: 0.82rem;">Rp ${parseFloat(subItem.totalPrice).toLocaleString('id-ID')}</strong>`
+                : '';
+
             if (isReward) {
                 itemsDetailsHTML += `
                     <div style="display: flex; align-items: center; justify-content: space-between; border-top: 1px dashed var(--border-color); padding-top: 6px; margin-top: 6px;">
                         <span style="font-size: 0.76rem; font-weight: 700; color: var(--ranch-amber);">🎁 [Bonus Pembelian] ${subItem.qty} ${unitText} ${categoryText}</span>
-                        <strong style="color: var(--text-muted); font-size: 0.8rem;">Rp 0</strong>
+                        ${priceItemHTML}
                     </div>
                 `;
             } else {
                 itemsDetailsHTML += `
                     <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
                         <span style="font-size: 0.78rem; font-weight: 700; color: var(--text-main);">${eggIcon}${subItem.qty} ${unitText} ${categoryText}</span>
-                        <strong style="color: var(--ranch-amber); font-size: 0.82rem;">Rp ${parseFloat(subItem.totalPrice).toLocaleString('id-ID')}</strong>
+                        ${subItemPriceHTML}
                     </div>
                 `;
             }
         });
+
+        const totalPriceHTML = currentRole !== 'visitor' ? `
+                <!-- ROW 4: Total Price -->
+                <div style="display: flex; align-items: center; justify-content: flex-end; margin-bottom: 4px;">
+                    <strong style="color: var(--ranch-amber); font-size: 0.9rem;">Total: Rp ${group.totalPrice.toLocaleString('id-ID')}</strong>
+                </div>
+        ` : '';
 
         html += `
             <div style="background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 10px; padding: 10px 12px;">
@@ -2571,10 +2655,7 @@ function renderTokoOrdersData() {
                     ${shortageWarning}
                 </div>
  
-                <!-- ROW 4: Total Price -->
-                <div style="display: flex; align-items: center; justify-content: flex-end; margin-bottom: 4px;">
-                    <strong style="color: var(--ranch-amber); font-size: 0.9rem;">Total: Rp ${group.totalPrice.toLocaleString('id-ID')}</strong>
-                </div>
+                ${totalPriceHTML}
 
                 ${actionButtons}
             </div>
@@ -4925,8 +5006,8 @@ function renderLeaderboardData() {
     });
 
     const leaderboard = Object.values(buyerMap).sort((a, b) => {
-        if (b.totalSpend !== a.totalSpend) return b.totalSpend - a.totalSpend;
-        return b.totalEggs - a.totalEggs;
+        if (b.totalEggs !== a.totalEggs) return b.totalEggs - a.totalEggs;
+        return b.totalSpend - a.totalSpend;
     });
 
     // Update Header Summary Stats
@@ -4934,9 +5015,13 @@ function renderLeaderboardData() {
     const totalEggsEl = document.getElementById('lb-stat-total-eggs');
     const topBuyerEl = document.getElementById('lb-stat-top-buyer');
 
+    const topBuyerName = leaderboard.length > 0
+        ? (currentRole === 'visitor' ? anonymizeBuyerName(leaderboard[0].name) : leaderboard[0].name)
+        : '-';
+
     if (totalBuyersEl) totalBuyersEl.textContent = leaderboard.length;
     if (totalEggsEl) totalEggsEl.textContent = totalEggsSoldAll.toLocaleString('id-ID') + ' Btr';
-    if (topBuyerEl) topBuyerEl.textContent = leaderboard.length > 0 ? leaderboard[0].name : '-';
+    if (topBuyerEl) topBuyerEl.textContent = topBuyerName;
 
     const podiumContainer = document.getElementById('leaderboard-podium-container');
     const listContainer = document.getElementById('leaderboard-ranking-list');
@@ -4958,11 +5043,11 @@ function renderLeaderboardData() {
 
     // Helper for buyer tier badge
     function getBuyerBadge(spend, eggs) {
-        if (spend >= 500000 || eggs >= 150) {
+        if (eggs >= 150 || spend >= 500000) {
             return { label: '👑 Sultan Telur', color: '#f59e0b', bg: 'rgba(245,158,11,0.15)', border: 'rgba(245,158,11,0.3)' };
-        } else if (spend >= 200000 || eggs >= 80) {
+        } else if (eggs >= 80 || spend >= 200000) {
             return { label: '🥇 Juragan Telur', color: '#eab308', bg: 'rgba(234,179,8,0.15)', border: 'rgba(234,179,8,0.3)' };
-        } else if (spend >= 100000 || eggs >= 40) {
+        } else if (eggs >= 40 || spend >= 100000) {
             return { label: '🥈 Pelanggan Setia', color: '#94a3b8', bg: 'rgba(148,163,184,0.15)', border: 'rgba(148,163,184,0.3)' };
         }
         return { label: '🥉 Sahabat Huma', color: '#b45309', bg: 'rgba(180,83,9,0.15)', border: 'rgba(180,83,9,0.3)' };
@@ -4983,24 +5068,24 @@ function renderLeaderboardData() {
                     const rankIdx = leaderboard.indexOf(b) + 1;
                     const isFirst = rankIdx === 1;
                     const isSecond = rankIdx === 2;
-                    const isThird = rankIdx === 3;
 
                     const medalIcon = isFirst ? '🥇' : (isSecond ? '🥈' : '🥉');
                     const borderColor = isFirst ? '#f59e0b' : (isSecond ? '#94a3b8' : '#b45309');
                     const cardBg = isFirst ? 'linear-gradient(180deg, rgba(245,158,11,0.2) 0%, rgba(20,20,20,0.85) 100%)' : 'var(--bg-card-subtle)';
                     const cardHeight = isFirst ? '145px' : (isSecond ? '130px' : '120px');
                     const badge = getBuyerBadge(b.totalSpend, b.totalEggs);
+                    const displayName = currentRole === 'visitor' ? anonymizeBuyerName(b.name) : b.name;
 
                     return `
                         <div style="flex: 1; min-width: 90px; max-width: 120px; background: ${cardBg}; border: 1px solid ${borderColor}; border-radius: 12px; padding: 10px 6px; text-align: center; display: flex; flex-direction: column; justify-content: space-between; height: ${cardHeight}; box-shadow: 0 4px 12px rgba(0,0,0,0.3); position: relative;">
                             <div>
                                 <div style="font-size: 1.3rem; line-height: 1; margin-bottom: 2px;">${medalIcon}</div>
-                                <strong style="font-size: 0.78rem; color: var(--text-main); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${b.name}</strong>
+                                <strong style="font-size: 0.78rem; color: var(--text-main); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${displayName}</strong>
                                 <span style="font-size: 0.62rem; color: ${borderColor}; font-weight: 700; display: block; margin-top: 1px;">${badge.label}</span>
                             </div>
                             <div style="border-top: 1px dashed ${borderColor}; padding-top: 4px; margin-top: 4px;">
-                                <strong style="font-size: 0.75rem; color: var(--ranch-amber); display: block;">Rp ${b.totalSpend.toLocaleString('id-ID')}</strong>
-                                <span style="font-size: 0.62rem; color: var(--text-muted);">${b.totalEggs} Btr (${b.orderCount}x)</span>
+                                <strong style="font-size: 0.85rem; color: var(--ranch-amber); display: block;">🥚 ${b.totalEggs} Butir</strong>
+                                <span style="font-size: 0.62rem; color: var(--text-muted);">${b.orderCount}x Pesanan</span>
                             </div>
                         </div>
                     `;
@@ -5015,6 +5100,7 @@ function renderLeaderboardData() {
         const badge = getBuyerBadge(b.totalSpend, b.totalEggs);
         const rankColor = rankNum === 1 ? '#f59e0b' : (rankNum === 2 ? '#94a3b8' : (rankNum === 3 ? '#b45309' : 'var(--text-muted)'));
         const phoneFormatted = b.phone ? (b.phone.substring(0, 5) + '****' + b.phone.substring(b.phone.length - 2)) : '';
+        const displayName = currentRole === 'visitor' ? anonymizeBuyerName(b.name) : b.name;
 
         return `
             <div style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 12px;">
@@ -5022,15 +5108,14 @@ function renderLeaderboardData() {
                     <span style="font-size: 0.85rem; font-weight: 900; color: ${rankColor}; width: 26px; height: 26px; background: var(--bg-card); border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 1px solid ${rankColor}; flex-shrink: 0;">#${rankNum}</span>
                     <div>
                         <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-                            <strong style="font-size: 0.82rem; color: var(--text-main);">${b.name}</strong>
+                            <strong style="font-size: 0.82rem; color: var(--text-main);">${displayName}</strong>
                             <span style="font-size: 0.62rem; background: ${badge.bg}; color: ${badge.color}; padding: 1px 6px; border-radius: 4px; border: 1px solid ${badge.border}; font-weight: 700;">${badge.label}</span>
                         </div>
                         <span style="font-size: 0.68rem; color: var(--text-muted); display: block; margin-top: 2px;">📱 ${phoneFormatted || 'Pelanggan'} • 🛒 ${b.orderCount} Transaksi Pesanan</span>
                     </div>
                 </div>
                 <div style="text-align: right; flex-shrink: 0;">
-                    <strong style="font-size: 0.85rem; color: var(--ranch-amber);">Rp ${b.totalSpend.toLocaleString('id-ID')}</strong>
-                    <span style="font-size: 0.68rem; color: var(--text-muted); display: block;">🥚 ${b.totalEggs} Butir</span>
+                    <strong style="font-size: 0.9rem; color: var(--ranch-amber);">🥚 ${b.totalEggs} Butir</strong>
                 </div>
             </div>
         `;
@@ -5434,7 +5519,7 @@ function closeEditEggTrooperModal() {
     }
 }
 
-function saveEggTrooperData(e) {
+async function saveEggTrooperData(e) {
     if (e) e.preventDefault();
 
     const inNBetina = document.getElementById('input-negeri-betina');
@@ -5457,8 +5542,25 @@ function saveEggTrooperData(e) {
     renderEggTrooperData();
     closeEditEggTrooperModal();
 
-    if (typeof showToast === 'function') {
-        showToast('🐔 Populasi Egg Trooper berhasil diperbarui!', 'success');
+    showNotificationModal('Sedang Menyimpan...', 'Mengirim data Egg Trooper ke server...', '☁️', 'info');
+    try {
+        await apiRequest('/settings/egg-trooper', 'POST', {
+            egg_trooper_data: JSON.stringify(newData)
+        });
+        showNotificationModal(
+            'Populasi Disimpan!',
+            'Data populasi Egg Trooper berhasil disimpan di server & tersinkronisasi ke semua HP/perangkat.',
+            '🐔',
+            'success'
+        );
+        fetchCloudData();
+    } catch (err) {
+        showNotificationModal(
+            'Populasi Disimpan (Lokal)',
+            'Data tersimpan secara lokal di perangkat ini.',
+            '🐔',
+            'success'
+        );
     }
 }
 
