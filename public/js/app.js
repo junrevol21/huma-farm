@@ -1542,8 +1542,76 @@ function openPaymentModal(orderId, buyerName, buyerPhone, orderDescArr, grandTot
 
     selectPaymentMethod('bsi');
 
+    const footerNormal = document.getElementById('pay-modal-footer-normal');
+    const footerViewOnly = document.getElementById('pay-modal-footer-view-only');
+    if (footerNormal) footerNormal.style.display = 'flex';
+    if (footerViewOnly) footerViewOnly.style.display = 'none';
+
     const modalPay = document.getElementById('modal-payment-instructions');
     if (modalPay) modalPay.classList.add('active');
+}
+
+function getBaseOrderId(orderId) {
+    if (!orderId) return '';
+    const str = String(orderId).trim();
+    if (str.includes('-')) {
+        const parts = str.split('-');
+        if (parts.length > 2) {
+            return parts.slice(0, 2).join('-');
+        }
+    }
+    return str;
+}
+
+function openReceiptModalFromHistory(orderId) {
+    const orders = JSON.parse(localStorage.getItem('huma_farm_orders') || '[]');
+    const baseId = getBaseOrderId(orderId);
+    
+    // Find all items belonging to this base order ID
+    const relatedOrders = orders.filter(item => getBaseOrderId(item.id) === baseId);
+    
+    if (!relatedOrders || relatedOrders.length === 0) {
+        showNotificationModal('Nota Tidak Ditemukan', 'Data pesanan tidak ditemukan.', '⚠️', 'warning');
+        return;
+    }
+
+    const firstItem = relatedOrders[0];
+    const buyerName = firstItem.buyerName || 'Pembeli';
+    const buyerPhone = firstItem.buyerPhone || '-';
+    
+    let grandTotal = 0;
+    const orderDescArr = [];
+    
+    relatedOrders.forEach(item => {
+        const itemTotal = parseFloat(item.totalPrice || 0);
+        grandTotal += itemTotal;
+        const categoryText = item.category === 'negeri' ? 'Telur Negeri' : 'Telur Kampung';
+        const unitText = item.unit === 'pack' ? 'Pack' : 'Butir';
+        if (item.isReward || itemTotal === 0 || (item.category && item.category.includes('bonus'))) {
+            orderDescArr.push(`🎁 [Bonus] ${item.qty} ${unitText} ${categoryText}`);
+        } else {
+            orderDescArr.push(`${item.qty} ${unitText} ${categoryText}`);
+        }
+    });
+
+    pendingOrderData = {
+        orderId: baseId,
+        buyerName,
+        buyerPhone,
+        orderDescArr,
+        grandTotal,
+        itemsToProcess: relatedOrders,
+        isSavedToDb: true,
+        isAdminCreated: true
+    };
+
+    openPaymentModal(baseId, buyerName, buyerPhone, orderDescArr, grandTotal, relatedOrders);
+
+    // Switch footer to View-Only mode (Hide WA & Kembali buttons, Show '✖ Tutup Nota' button only)
+    const footerNormal = document.getElementById('pay-modal-footer-normal');
+    const footerViewOnly = document.getElementById('pay-modal-footer-view-only');
+    if (footerNormal) footerNormal.style.display = 'none';
+    if (footerViewOnly) footerViewOnly.style.display = 'block';
 }
 
 function calculateQrisCRC16(str) {
@@ -1706,7 +1774,7 @@ async function downloadQrisImage() {
 
     const qrisImg = document.getElementById('qris-img-element');
 
-    showNotificationModal('Mengunduh Nota Pemesanan...', 'Menyiapkan gambar nota...', '🖼️', 'info');
+    showNotificationModal('Menyiapkan Nota...', 'Memproses gambar nota pemesanan...', '🖼️', 'info');
 
     const orderIdEl = document.getElementById('pay-modal-order-id');
     const cleanId = orderIdEl ? orderIdEl.textContent.trim().replace('#', '') : 'ORD';
@@ -1749,21 +1817,53 @@ async function downloadQrisImage() {
             }
         }
 
-        canvas.toBlob((blob) => {
+        canvas.toBlob(async (blob) => {
             if (!blob) {
                 console.error('toBlob returned null, using fallback');
                 fallbackCanvasDownload();
                 return;
             }
-            const blobUrl = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = blobUrl;
-            a.download = fileName;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-            showNotificationModal('Nota Berhasil Diunduh!', `${fileName} tersimpan.`, '✅', 'success');
+
+            const imageFile = new File([blob], fileName, { type: 'image/png' });
+
+            // OPSI C: WEB SHARE API UNTUK SMARTPHONE (ANDROID / IOS)
+            let sharedSuccessfully = false;
+            if (navigator.share && navigator.canShare && navigator.canShare({ files: [imageFile] })) {
+                try {
+                    await navigator.share({
+                        title: 'Nota Pemesanan Huma Farm',
+                        text: `Nota Pemesanan ${cleanId} - Peternakan Huma Farm`,
+                        files: [imageFile]
+                    });
+                    sharedSuccessfully = true;
+                    showNotificationModal('Nota Berhasil Dibagikan!', 'Silakan simpan ke Galeri / WA.', '✅', 'success');
+                    return;
+                } catch (shareErr) {
+                    if (shareErr.name === 'AbortError') {
+                        // User cancelled share sheet silently
+                        return;
+                    }
+                    console.warn('Web Share API failed, falling back to direct download:', shareErr);
+                }
+            }
+
+            // FALLBACK LAPTOP / PC / BROWSER DENGAN TIP SCREENSHOT
+            if (!sharedSuccessfully) {
+                const blobUrl = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = fileName;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+                showNotificationModal(
+                    'Nota Berhasil Diunduh!',
+                    `${fileName} tersimpan.\n💡 Tips: Anda juga bisa screenshot layar langsung untuk hasil 100% instan!`,
+                    '✅',
+                    'success'
+                );
+            }
         }, 'image/png');
 
     } catch (err) {
@@ -1947,19 +2047,46 @@ function fallbackCanvasDownload() {
         ctx.font = 'italic 11px sans-serif';
         ctx.fillText('Terima kasih telah berbelanja telur segar berkualitas di Huma Farm!', cardWidth / 2, cardHeight - 20);
 
-        canvas.toBlob((blob) => {
+        canvas.toBlob(async (blob) => {
             if (!blob) return;
-            const blobUrl = URL.createObjectURL(blob);
-            const a = document.createElement('a');
             const cleanId = orderId.replace('#', '');
             const fileName = `HumaFarm_NotaPemesanan_${cleanId}.png`;
-            a.href = blobUrl;
-            a.download = fileName;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(blobUrl);
-            showNotificationModal('Nota Pemesanan Diunduh!', `Gambar ${fileName} berhasil tersimpan.`, '✅', 'success');
+            const imageFile = new File([blob], fileName, { type: 'image/png' });
+
+            // OPSI C: WEB SHARE API UNTUK SMARTPHONE (ANDROID / IOS)
+            let sharedSuccessfully = false;
+            if (navigator.share && navigator.canShare && navigator.canShare({ files: [imageFile] })) {
+                try {
+                    await navigator.share({
+                        title: 'Nota Pemesanan Huma Farm',
+                        text: `Nota Pemesanan ${cleanId} - Peternakan Huma Farm`,
+                        files: [imageFile]
+                    });
+                    sharedSuccessfully = true;
+                    showNotificationModal('Nota Berhasil Dibagikan!', 'Silakan simpan ke Galeri / WA.', '✅', 'success');
+                    return;
+                } catch (shareErr) {
+                    if (shareErr.name === 'AbortError') return;
+                }
+            }
+
+            // FALLBACK LAPTOP / PC / BROWSER
+            if (!sharedSuccessfully) {
+                const blobUrl = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = fileName;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+                showNotificationModal(
+                    'Nota Berhasil Diunduh!',
+                    `${fileName} tersimpan.\n💡 Tips: Anda juga bisa screenshot layar langsung untuk hasil 100% instan!`,
+                    '✅',
+                    'success'
+                );
+            }
         }, 'image/png');
     };
 
@@ -2375,10 +2502,13 @@ function renderTokoOrdersData() {
         let actionButtons = '';
         if (currentRole === 'admin') {
             actionButtons = `
-                <div style="display: flex; gap: 5px; margin-top: 4px; justify-content: flex-end;">
-                    ${group.paymentStatus !== 'Lunas' && group.paymentStatus !== 'Batal' ? `<button class="btn btn-ranch" style="font-size: 0.68rem; padding: 3px 9px; min-height: 26px;" onclick="confirmUserOrderPayment('${group.items[0].id}')">✓ Lunas</button>` : ''}
-                    <button class="btn btn-outline" style="font-size: 0.68rem; padding: 3px 8px; min-height: 26px; color: var(--ranch-amber); border-color: var(--ranch-amber);" onclick="editUserOrderRecord('${group.items[0].id}')">✏️ Edit</button>
-                    <button class="btn btn-rose" style="font-size: 0.68rem; padding: 3px 7px; min-height: 26px;" onclick="deleteUserOrderRecord('${group.items[0].id}')">🗑️ Hapus</button>
+                <div style="display: flex; gap: 5px; margin-top: 4px; justify-content: space-between; align-items: center;">
+                    <button class="btn btn-outline" style="font-size: 0.68rem; padding: 3px 8px; min-height: 26px; color: var(--text-main);" onclick="openReceiptModalFromHistory('${group.id}')">🧾 Nota</button>
+                    <div style="display: flex; gap: 5px; align-items: center;">
+                        ${group.paymentStatus !== 'Lunas' && group.paymentStatus !== 'Batal' ? `<button class="btn btn-ranch" style="font-size: 0.68rem; padding: 3px 9px; min-height: 26px;" onclick="confirmUserOrderPayment('${group.items[0].id}')">✓ Lunas</button>` : ''}
+                        <button class="btn btn-outline" style="font-size: 0.68rem; padding: 3px 8px; min-height: 26px; color: var(--ranch-amber); border-color: var(--ranch-amber);" onclick="editUserOrderRecord('${group.items[0].id}')">✏️ Edit</button>
+                        <button class="btn btn-rose" style="font-size: 0.68rem; padding: 3px 7px; min-height: 26px;" onclick="deleteUserOrderRecord('${group.items[0].id}')">🗑️ Hapus</button>
+                    </div>
                 </div>
             `;
         } else if (currentRole === 'user' && group.paymentStatus !== 'Lunas' && group.paymentStatus !== 'Batal') {
@@ -2426,9 +2556,12 @@ function renderTokoOrdersData() {
 
         html += `
             <div style="background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 10px; padding: 10px 12px;">
-                <!-- ROW 1: ID + Timestamp -->
+                <!-- ROW 1: ID + Timestamp + Admin Nota Button -->
                 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px;">
-                    <span style="font-size: 0.65rem; background: var(--bg-card); border: 1px solid var(--border-color); padding: 2px 7px; border-radius: 5px; font-weight: 800; color: var(--ranch-amber);">${group.id.startsWith('#') ? group.id : '#' + group.id}</span>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <span style="font-size: 0.65rem; background: var(--bg-card); border: 1px solid var(--border-color); padding: 2px 7px; border-radius: 5px; font-weight: 800; color: var(--ranch-amber);">${group.id.startsWith('#') ? group.id : '#' + group.id}</span>
+                        ${currentRole === 'admin' ? `<button class="btn btn-outline" style="font-size: 0.62rem; padding: 1px 7px; min-height: 22px; color: var(--text-main);" onclick="openReceiptModalFromHistory('${group.id}')">🧾 Nota</button>` : ''}
+                    </div>
                     <span style="font-size: 0.67rem; color: var(--text-muted);">📅 ${formattedDate}</span>
                 </div>
  

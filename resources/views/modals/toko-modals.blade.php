@@ -437,8 +437,8 @@
                     
                     <span style="font-size: 0.65rem; color: var(--text-muted); display: block; line-height: 1.35; margin-bottom: 6px;">Scan QRIS via Mobile Banking / E-Wallet Anda (BCA, GoPay, OVO, Dana, dll) & masukkan nominal transfer.</span>
                     
-                    <!-- BUTTON DOWNLOAD GAMBAR NOTA PEMESANAN PERSIS WEB -->
-                    <button type="button" class="btn btn-outline" style="font-size: 0.68rem; width: 100%; padding: 4px 8px; min-height: 28px;" onclick="downloadQrisImage()">🖼️ Download Nota Pemesanan</button>
+                    <!-- BUTTON DOWNLOAD / BAGIKAN GAMBAR NOTA PEMESANAN PERSIS WEB -->
+                    <button type="button" class="btn btn-outline" style="font-size: 0.68rem; width: 100%; padding: 4px 8px; min-height: 28px;" onclick="downloadQrisImage()">📲 Simpan / Bagikan Nota Pemesanan</button>
                 </div>
 
             </div>
@@ -446,9 +446,15 @@
         </div>
 
         <!-- Footer Action Buttons (Fixed at Bottom) -->
-        <div style="display: flex; gap: 6px; margin-top: 4px; flex-shrink: 0;">
+        <!-- Normal Checkout Mode: Kembali + Pesan via WA -->
+        <div id="pay-modal-footer-normal" style="display: flex; gap: 6px; margin-top: 4px; flex-shrink: 0;">
             <button type="button" class="btn btn-outline" style="flex: 1; font-size: 0.72rem; padding: 6px; min-height: 30px;" onclick="closePaymentInstructionsModal(true)">Kembali</button>
             <button type="button" class="btn btn-ranch" style="flex: 1.4; font-size: 0.72rem; padding: 6px; min-height: 30px;" onclick="executeOrderWithCountDown()">💬 Pesan via WA ➔</button>
+        </div>
+
+        <!-- View Only Mode (Buka dari tombol Nota di Riwayat): Tutup Nota Only -->
+        <div id="pay-modal-footer-view-only" style="display: none; margin-top: 4px; flex-shrink: 0;">
+            <button type="button" class="btn btn-outline" style="width: 100%; font-size: 0.76rem; padding: 6px; min-height: 32px;" onclick="closePaymentInstructionsModal()">✖ Tutup Nota</button>
         </div>
     </div>
 </div>
